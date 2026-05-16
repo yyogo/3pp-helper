@@ -1,4 +1,4 @@
-import { clipSegmentToRect, dist, v } from "./geom.js";
+import { clipSegmentToRect, dist, lineIntersect, v } from "./geom.js";
 import {
   ANCHOR_CORNERS,
   BOX_EDGES,
@@ -614,6 +614,80 @@ function draw() {
 
   // Keep the toolbox VP sliders in sync with whatever the user did on canvas.
   syncVPSliders();
+  updateStatusBar(vps, w, h);
+}
+
+/**
+ * Compute viewing geometry from the three VPs:
+ *   - Principal point P = orthocenter of triangle V1V2V3.
+ *   - Focal length d satisfies (V_i − P) · (V_j − P) = −d² for every pair.
+ *
+ * Returns a tagged result so the status bar can distinguish:
+ *   ok       — valid 3-point perspective, `focal` populated
+ *   ortho    — at least one VP at infinity (no focal length defined)
+ *   obtuse   — VP triangle is obtuse → d² < 0; no real pinhole camera
+ *              produces this perspective (formal FOV would be > 180°)
+ *   degenerate — VPs collinear / numerical failure
+ */
+function computeViewGeometry(vps) {
+  if (!vps?.vx?.finite || !vps?.vy?.finite || !vps?.vz?.finite) {
+    return { kind: "ortho" };
+  }
+  const V1 = vps.vx.p, V2 = vps.vy.p, V3 = vps.vz.p;
+  const perp = (a, b) => ({ x: -(b.y - a.y), y: b.x - a.x });
+  const l1a = V1, l1b = { x: V1.x + perp(V2, V3).x, y: V1.y + perp(V2, V3).y };
+  const l2a = V2, l2b = { x: V2.x + perp(V1, V3).x, y: V2.y + perp(V1, V3).y };
+  const P = lineIntersect(l1a, l1b, l2a, l2b);
+  if (!P) return { kind: "degenerate" };
+  const v1 = { x: V1.x - P.x, y: V1.y - P.y };
+  const v2 = { x: V2.x - P.x, y: V2.y - P.y };
+  const dSq = -(v1.x * v2.x + v1.y * v2.y);
+  if (!(dSq > 0)) return { kind: "obtuse" };
+  return { kind: "ok", P, focal: Math.sqrt(dSq) };
+}
+
+function updateStatusBar(vps, wPx, hPx) {
+  const el = document.getElementById("status-bar");
+  if (!el) return;
+  const geom = computeViewGeometry(vps);
+  const parts = [];
+  if (geom.kind === "ok") {
+    // Convert viewport pixel dims to world units (matches the units of focal
+    // length and the VPs).
+    const wWorld = wPx / zoom;
+    const hWorld = hPx / zoom;
+    const toDeg = 180 / Math.PI;
+    const fovH = 2 * Math.atan(wWorld / (2 * geom.focal)) * toDeg;
+    const fovV = 2 * Math.atan(hWorld / (2 * geom.focal)) * toDeg;
+    parts.push(
+      `FOV  H ${fovH.toFixed(1)}° · V ${fovV.toFixed(1)}°` +
+      `   f ${geom.focal.toFixed(0)}px   zoom ${zoom.toFixed(2)}×`,
+    );
+  } else if (geom.kind === "ortho") {
+    parts.push("FOV —   (orthographic axis)");
+  } else if (geom.kind === "obtuse") {
+    // d² is imaginary — the conceptual FOV exceeds 180°, i.e. no pinhole
+    // camera could ever frame these three axes simultaneously.
+    parts.push('<span class="warn">FOV &gt; 180°</span>   (obtuse VP triangle — no real camera matches)');
+  } else {
+    parts.push("FOV —   (degenerate VP triangle)");
+  }
+  if (boxOutsideConeOfVision(vps, corners)) {
+    // Any corner outside the VP triangle puts the box partially in the
+    // "hyperbolic" region — perspective lines from that corner can't be
+    // realised by an actual pinhole camera, projection looks bowed.
+    parts.unshift('<span class="warn">⚠ hyperbolic view</span>');
+  }
+  el.innerHTML = parts.join("   ");
+}
+
+function boxOutsideConeOfVision(vps, cs) {
+  if (!vps?.vx?.finite || !vps?.vy?.finite || !vps?.vz?.finite) return false;
+  const tri = [vps.vx.p, vps.vy.p, vps.vz.p];
+  for (let i = 0; i < 8; i++) {
+    if (!cs[i] || !pointInTriangle(cs[i], tri)) return true;
+  }
+  return false;
 }
 
 /**
