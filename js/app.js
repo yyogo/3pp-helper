@@ -11,6 +11,7 @@ import {
   restoreVPs,
   snapshotVPs,
   syncCuboid,
+  visibleFaces,
   translateBoxKeepingVPs,
 } from "./cuboid.js";
 import { drawAxisGrid, drawVP } from "./grid.js";
@@ -73,8 +74,21 @@ function viewSize() {
 function resize() {
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.parentElement.getBoundingClientRect();
-  canvas.width = rect.width * dpr;
-  canvas.height = rect.height * dpr;
+  const targetW = Math.round(rect.width * dpr);
+  const targetH = Math.round(rect.height * dpr);
+  // Short-circuit if nothing changed. ResizeObserver can fire spuriously
+  // (subpixel layout jitter, etc.) and re-setting canvas.width/height clears
+  // the canvas and forces a redraw — which during a drag manifests as
+  // every-frame stalls because we end up resizing twice per pointermove.
+  if (canvas.width === targetW && canvas.height === targetH) {
+    if (!corners.length) {
+      resetBox();
+      draw();
+    }
+    return;
+  }
+  canvas.width = targetW;
+  canvas.height = targetH;
   canvas.style.width = `${rect.width}px`;
   canvas.style.height = `${rect.height}px`;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -230,7 +244,52 @@ function viewportWorldRect(w, h, margin = 400) {
   return { x0: tl.x, y0: tl.y, x1: br.x, y1: br.y };
 }
 
-function drawBoxLayer(layer, lineScale, handleScale, hovered) {
+/**
+ * Split segment p0→p1 by triangle `tri` into runs of "inside" / "outside"
+ * subsegments (in p0→p1 parameter space). Returns 1–3 entries, each
+ * { t0, t1, inside }, in order along the segment. Triangle edges are tested
+ * as line segments; an intersection counts only when it lies on the triangle
+ * side as well (not just the extended line), so a box edge that misses the
+ * triangle laterally produces a single "outside" run.
+ */
+function splitSegmentByTriangle(p0, p1, tri) {
+  const ts = [0, 1];
+  const dx1 = p1.x - p0.x;
+  const dy1 = p1.y - p0.y;
+  for (let i = 0; i < 3; i++) {
+    const a = tri[i];
+    const b = tri[(i + 1) % 3];
+    const dx2 = b.x - a.x;
+    const dy2 = b.y - a.y;
+    const denom = dx1 * dy2 - dy1 * dx2;
+    if (Math.abs(denom) < 1e-9) continue; // parallel
+    const t = ((a.x - p0.x) * dy2 - (a.y - p0.y) * dx2) / denom;
+    const s = ((a.x - p0.x) * dy1 - (a.y - p0.y) * dx1) / denom;
+    if (t > 1e-6 && t < 1 - 1e-6 && s >= 0 && s <= 1) ts.push(t);
+  }
+  ts.sort((u, v) => u - v);
+  const out = [];
+  for (let i = 0; i + 1 < ts.length; i++) {
+    const tm = (ts[i] + ts[i + 1]) * 0.5;
+    const mid = { x: p0.x + dx1 * tm, y: p0.y + dy1 * tm };
+    out.push({ t0: ts[i], t1: ts[i + 1], inside: pointInTriangle(mid, tri) });
+  }
+  return out;
+}
+
+// Same-side test: q is inside iff it's on the same side of each edge as the
+// opposite vertex. Robust to triangle winding.
+function pointInTriangle(q, tri) {
+  const sign = (a, b, c) => (a.x - c.x) * (b.y - c.y) - (b.x - c.x) * (a.y - c.y);
+  const d0 = sign(q, tri[0], tri[1]);
+  const d1 = sign(q, tri[1], tri[2]);
+  const d2 = sign(q, tri[2], tri[0]);
+  const hasNeg = d0 < 0 || d1 < 0 || d2 < 0;
+  const hasPos = d0 > 0 || d1 > 0 || d2 > 0;
+  return !(hasNeg && hasPos);
+}
+
+function drawBoxLayer(layer, vps, lineScale, handleScale, hovered) {
   const rect = viewportWorldRect(viewSize().w, viewSize().h, 400);
 
   // Translucent hull fill on hover so the draggable region is obvious.
@@ -248,19 +307,52 @@ function drawBoxLayer(layer, lineScale, handleScale, hovered) {
     }
   }
 
+  // Tint each front-facing face in the color of the axis it's perpendicular
+  // to (so vx-normal faces match the Vx grid color, etc.). Front-only fills
+  // partition the silhouette cleanly into 1–3 non-overlapping regions, which
+  // both communicates orientation and avoids the "fill everything = solid
+  // box" pitfall you get when both sides paint over each other.
+  const front = visibleFaces(corners, vps);
+  if (front.length) {
+    ctx.save();
+    ctx.globalAlpha = ctx.globalAlpha * 0.35;
+    for (const { corners: f, axis } of front) {
+      ctx.fillStyle = gridLayerColor(axis);
+      ctx.beginPath();
+      ctx.moveTo(corners[f[0]].x, corners[f[0]].y);
+      for (let i = 1; i < f.length; i++) ctx.lineTo(corners[f[i]].x, corners[f[i]].y);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
   ctx.strokeStyle = layer.color;
   ctx.lineWidth = (hovered ? 2.5 : 2) * lineScale;
+  // Triangle is only defined when all three VPs are finite. When it's
+  // available, edges (or parts of edges) that lie outside it get dashed —
+  // signalling that the projection is degenerate over there.
+  const tri = vps.vx?.finite && vps.vy?.finite && vps.vz?.finite
+    ? [vps.vx.p, vps.vy.p, vps.vz.p]
+    : null;
+  const dashOut = [6 * lineScale, 4 * lineScale];
   for (const [a, b] of BOX_EDGES) {
-    const clipped = clipSegmentToRect(
-      corners[a], corners[b],
-      rect.x0, rect.y0, rect.x1, rect.y1,
-    );
-    if (!clipped) continue;
-    ctx.beginPath();
-    ctx.moveTo(clipped[0].x, clipped[0].y);
-    ctx.lineTo(clipped[1].x, clipped[1].y);
-    ctx.stroke();
+    const p0 = corners[a];
+    const p1 = corners[b];
+    const segs = tri ? splitSegmentByTriangle(p0, p1, tri) : [{ t0: 0, t1: 1, inside: true }];
+    for (const seg of segs) {
+      const q0 = { x: p0.x + (p1.x - p0.x) * seg.t0, y: p0.y + (p1.y - p0.y) * seg.t0 };
+      const q1 = { x: p0.x + (p1.x - p0.x) * seg.t1, y: p0.y + (p1.y - p0.y) * seg.t1 };
+      const clipped = clipSegmentToRect(q0, q1, rect.x0, rect.y0, rect.x1, rect.y1);
+      if (!clipped) continue;
+      ctx.setLineDash(seg.inside ? [] : dashOut);
+      ctx.beginPath();
+      ctx.moveTo(clipped[0].x, clipped[0].y);
+      ctx.lineTo(clipped[1].x, clipped[1].y);
+      ctx.stroke();
+    }
   }
+  ctx.setLineDash([]);
   for (let i = 0; i < 8; i++) {
     const p = corners[i];
     if (p.x < rect.x0 || p.x > rect.x1 || p.y < rect.y0 || p.y > rect.y1) continue;
@@ -347,6 +439,36 @@ function drawHorizonLayer(layer, vps, lineScale, rect) {
   grad.addColorStop(1, colB);
   stroke(pA, pB, grad, false);
   stroke(pB, outerB, colB, true);
+  ctx.restore();
+}
+
+/**
+ * Closed triangle through the three VPs — the camera's cone of vision. Inside
+ * the triangle the implied pinhole projection is well-behaved; outside it the
+ * projection degenerates (foreshortening goes hyperbolic, faces flip). Edges
+ * adjacent to a VP-at-infinity are skipped (the triangle isn't well-defined).
+ */
+function drawVPTriangleLayer(layer, vps, lineScale) {
+  const pts = [vps.vx, vps.vy, vps.vz];
+  if (pts.some((vp) => !vp?.finite)) return;
+  const [a, b, c] = pts.map((vp) => vp.p);
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(a.x, a.y);
+  ctx.lineTo(b.x, b.y);
+  ctx.lineTo(c.x, c.y);
+  ctx.closePath();
+  // Faint interior fill so "inside vs outside" reads at a glance, plus a
+  // crisper outline.
+  const savedAlpha = ctx.globalAlpha;
+  ctx.fillStyle = layer.color;
+  ctx.globalAlpha = savedAlpha * 0.08;
+  ctx.fill();
+  ctx.globalAlpha = savedAlpha;
+  ctx.strokeStyle = layer.color;
+  ctx.lineWidth = 1.25 * lineScale;
+  ctx.setLineDash([]);
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -452,9 +574,10 @@ function draw() {
       case "background": break; // painted before the world transform
       case "grid": drawGridLayer(layer, vps, divisions, lineScale, gridRect, corners[0]); break;
       case "horizon": drawHorizonLayer(layer, vps, lineScale, gridRect); break;
+      case "vp-triangle": drawVPTriangleLayer(layer, vps, lineScale); break;
       case "box": {
         const boxHovered = hoveredLayerId === layer.id || dragGizmoLayerId === layer.id;
-        drawBoxLayer(layer, lineScale, handleScale, boxHovered);
+        drawBoxLayer(layer, vps, lineScale, handleScale, boxHovered);
         break;
       }
       case "image": drawImageLayer(layer); break;
@@ -914,7 +1037,7 @@ function renderLayerList() {
     head.className = "layer-head";
 
     let swatch = null;
-    if (layer.type === "grid" || layer.type === "box") {
+    if (layer.type === "grid" || layer.type === "box" || layer.type === "vp-triangle") {
       swatch = document.createElement("button");
       swatch.type = "button";
       swatch.className = "swatch";

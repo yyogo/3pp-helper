@@ -19,14 +19,72 @@ export const BOX_EDGES = [
 export const ANCHOR_CORNERS = [0, 1, 2, 4];
 export const DERIVED_CORNERS = [3, 5, 6, 7];
 
-const FACES = [
-  [0, 1, 3, 2],
-  [4, 5, 7, 6],
-  [0, 2, 6, 4],
-  [1, 3, 7, 5],
-  [0, 1, 5, 4],
-  [2, 3, 7, 6],
+// 6 quads, each ordered so the winding is CCW when viewed from *outside* the
+// cube in 3D right-handed coords (corner bits: x | y<<1 | z<<2). Verified by
+// cross product of the first two edges matching the outward normal for each
+// face. With this convention the 2D signed-area test in visibleFaces() picks
+// out the front-facing quads correctly; opposite faces necessarily get
+// opposite signs because their 3D normals are antiparallel.
+//
+// Note: boxConfigValid only inspects the two diagonals (a-c, b-d) of each
+// quad, which are invariant under cyclic-direction reversal, so changing
+// winding here does not affect it.
+// Each face: { corners (CCW from outside in 3D, kept for consistency / fill
+// path-order), axis it's perpendicular to }. "axis" is the short VP name.
+// Faces are grouped in axis pairs: [axis=0 face, axis=1 face] for each of
+// x, y, z. visibleFaces() relies on that ordering.
+export const FACES = [
+  { corners: [0, 2, 3, 1], axis: "z" }, // z=0
+  { corners: [4, 5, 7, 6], axis: "z" }, // z=1
+  { corners: [0, 4, 6, 2], axis: "x" }, // x=0
+  { corners: [1, 3, 7, 5], axis: "x" }, // x=1
+  { corners: [0, 1, 5, 4], axis: "y" }, // y=0
+  { corners: [2, 6, 7, 3], axis: "y" }, // y=1
 ];
+
+/**
+ * One visible face per axis (always 3 total). For each axis we have two
+ * parallel faces; the visible one is the one *opposite* the vanishing point,
+ * i.e. on the camera-side. With a finite VP that's whichever face centroid
+ * is farther from the VP; with a VP at infinity, the centroid with the
+ * smaller projection onto the VP direction (= "less far away in that
+ * direction" = camera-side).
+ */
+export function visibleFaces(corners, vps) {
+  const out = [];
+  // FACES is laid out so consecutive pairs share an axis: [0,1]=z, [2,3]=x, [4,5]=y.
+  const pairs = [[0, 1, "vz"], [2, 3, "vx"], [4, 5, "vy"]];
+  for (const [aIdx, bIdx, vpKey] of pairs) {
+    const vp = vps?.[vpKey];
+    if (!vp) continue;
+    const fa = FACES[aIdx];
+    const fb = FACES[bIdx];
+    const ca = quadCentroid(corners, fa.corners);
+    const cb = quadCentroid(corners, fb.corners);
+    let pickB;
+    if (vp.finite) {
+      const da2 = (ca.x - vp.p.x) ** 2 + (ca.y - vp.p.y) ** 2;
+      const db2 = (cb.x - vp.p.x) ** 2 + (cb.y - vp.p.y) ** 2;
+      pickB = db2 > da2;
+    } else {
+      const pa = ca.x * vp.dir.x + ca.y * vp.dir.y;
+      const pb = cb.x * vp.dir.x + cb.y * vp.dir.y;
+      pickB = pb < pa;
+    }
+    out.push(pickB ? fb : fa);
+  }
+  return out;
+}
+
+function quadCentroid(corners, idx) {
+  let x = 0;
+  let y = 0;
+  for (const i of idx) {
+    x += corners[i].x;
+    y += corners[i].y;
+  }
+  return { x: x / idx.length, y: y / idx.length };
+}
 
 const AXIS_OF_ANCHOR = { 1: "vx", 2: "vy", 4: "vz" };
 const ANCHOR_OF_AXIS = { vx: 1, vy: 2, vz: 4 };
@@ -276,7 +334,7 @@ function segmentsCross(a, b, c, d) {
 }
 
 function boxConfigValid(corners) {
-  for (const [a, b, c, d] of FACES) {
+  for (const { corners: [a, b, c, d] } of FACES) {
     if (!segmentsCross(corners[a], corners[c], corners[b], corners[d])) {
       return false;
     }

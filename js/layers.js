@@ -2,12 +2,14 @@
  * Layer model. The layers array is ordered bottom→top (index 0 drawn first).
  *
  * Layer types:
- *   - background: { color } — full-viewport screen-space fill
- *   - grid:       { axis: 'x'|'y'|'z', color }
- *   - horizon:    { axes: ['x','y'|'z'] } — line through the two VPs, color
- *                 is derived dynamically from the corresponding grid layers
- *   - box:        wireframe + corner handles
- *   - image:      { image: HTMLImageElement, pos: {x,y}, scale, width, height }
+ *   - background:  { color } — full-viewport screen-space fill
+ *   - grid:        { axis: 'x'|'y'|'z', color }
+ *   - horizon:     { axes: ['x','y'|'z'] } — line through the two VPs, color
+ *                  is derived dynamically from the corresponding grid layers
+ *   - vp-triangle: { color } — closed triangle through the 3 VPs (the camera's
+ *                  cone of vision; orthocenter is the principal point)
+ *   - box:         wireframe + corner handles
+ *   - image:       { image: HTMLImageElement, pos: {x,y}, scale, width, height }
  */
 
 const GRID_HUES = { x: 10, y: 140, z: 205 };
@@ -37,6 +39,15 @@ export function createDefaultLayers() {
     makeHorizonLayer("x", "y"),
     makeHorizonLayer("y", "z"),
     makeHorizonLayer("x", "z"),
+    {
+      id: "vp-triangle",
+      type: "vp-triangle",
+      name: "VP triangle",
+      visible: true,
+      opacity: 0.6,
+      hue: 50,
+      color: hueToColor(50),
+    },
     {
       id: "box",
       type: "box",
