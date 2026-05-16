@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Perspective box spike</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font: 13px/1.4 system-ui, sans-serif;
+      background: #111;
+      color: #ccc;
+      height: 100vh;
+      display: flex;
+      overflow: hidden;
+    }
+    main { flex: 1; position: relative; min-width: 0; }
+    canvas { display: block; width: 100%; height: 100%; cursor: default; touch-action: none; }
+
+    aside {
+      width: 280px;
+      border-left: 1px solid #2a2a2a;
+      background: #181818;
+      display: flex;
+      flex-direction: column;
+      transition: width 0.15s;
+    }
+    aside.collapsed { width: 36px; }
+    aside.collapsed .toolbox-body { display: none; }
+
+    .toolbox-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 10px;
+      border-bottom: 1px solid #2a2a2a;
+      background: #1f1f1f;
+    }
+    .toolbox-header strong { flex: 1; font-size: 12px; color: #ddd; }
+    aside.collapsed .toolbox-header strong,
+    aside.collapsed .toolbox-header .header-actions { display: none; }
+
+    .toolbox-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px;
+    }
+
+    .section { margin-bottom: 14px; }
+    .section-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #888;
+      margin-bottom: 6px;
+    }
+
+    button {
+      background: #2a2a2a;
+      border: 1px solid #3a3a3a;
+      color: #ddd;
+      padding: 4px 8px;
+      cursor: pointer;
+      font: inherit;
+      border-radius: 3px;
+    }
+    button:hover { background: #333; }
+    button.icon { padding: 2px 5px; font-size: 11px; min-width: 22px; }
+
+    input[type="range"] { width: 100%; }
+    input[type="file"] { display: none; }
+    .upload-btn { display: inline-block; }
+
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .row + .row { margin-top: 4px; }
+
+    .layer {
+      padding: 8px;
+      border: 1px solid #2a2a2a;
+      border-radius: 3px;
+      margin-bottom: 6px;
+      background: #1f1f1f;
+    }
+    .layer-head {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 6px;
+    }
+    .layer-name {
+      flex: 1;
+      font-size: 12px;
+      color: #ddd;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .layer.hidden .layer-name { color: #555; }
+    .swatch {
+      position: relative;
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border-radius: 3px;
+      flex-shrink: 0;
+      padding: 0;
+      border: 1px solid #444;
+      cursor: pointer;
+    }
+    .swatch:hover { border-color: #888; }
+    /* Native color picker hidden over the swatch — the swatch itself is the click target. */
+    .swatch .color-picker {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      opacity: 0;
+      border: 0;
+      padding: 0;
+      cursor: pointer;
+    }
+
+    .hue-row { margin-top: 6px; }
+    .hue-slider {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 12px;
+      border-radius: 6px;
+      border: 1px solid #333;
+      background: linear-gradient(to right,
+        hsl(0,   65%, 55%),
+        hsl(60,  65%, 55%),
+        hsl(120, 65%, 55%),
+        hsl(180, 65%, 55%),
+        hsl(240, 65%, 55%),
+        hsl(300, 65%, 55%),
+        hsl(360, 65%, 55%));
+      outline: none;
+      cursor: pointer;
+    }
+    .hue-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid #1a1a1a;
+      cursor: grab;
+    }
+    .hue-slider::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid #1a1a1a;
+      cursor: grab;
+    }
+    .layer-actions {
+      display: flex;
+      gap: 2px;
+    }
+    .opacity-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: #888;
+    }
+    .opacity-row span { width: 24px; text-align: right; }
+
+    .hint { color: #666; font-size: 11px; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <main>
+    <canvas id="view"></canvas>
+  </main>
+  <aside id="toolbox">
+    <div class="toolbox-header">
+      <button id="toggle-toolbox" class="icon" title="Collapse">≡</button>
+      <strong>Toolbox</strong>
+      <div class="header-actions">
+        <button id="reset-btn" title="Reset box to default">Reset</button>
+      </div>
+    </div>
+    <div class="toolbox-body">
+      <div class="section">
+        <div class="section-label">Grid spacing</div>
+        <div class="row">
+          <input type="range" id="spacing" min="2" max="24" value="8" />
+          <span id="spacing-val" style="width:18px;text-align:right;">8</span>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-label">Reference images</div>
+        <label class="upload-btn">
+          <input type="file" id="upload" accept="image/*" multiple />
+          <button type="button" onclick="document.getElementById('upload').click()">+ Load image…</button>
+        </label>
+      </div>
+
+      <div class="section">
+        <div class="section-label">Layers (top = front)</div>
+        <div id="layers-list"></div>
+      </div>
+
+      <div class="hint">Drag corners · gizmo on hover · scroll = zoom · empty drag = pan</div>
+    </div>
+  </aside>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
