@@ -56,12 +56,12 @@ function copyVP(vp) {
   return { finite: false, dir: { x: vp.dir.x, y: vp.dir.y } };
 }
 
-function snapshotVPs() {
+export function snapshotVPs() {
   if (!stableVPs) return null;
   return { vx: copyVP(stableVPs.vx), vy: copyVP(stableVPs.vy), vz: copyVP(stableVPs.vz) };
 }
 
-function restoreVPs(snap) {
+export function restoreVPs(snap) {
   stableVPs = snap
     ? { vx: copyVP(snap.vx), vy: copyVP(snap.vy), vz: copyVP(snap.vz) }
     : null;

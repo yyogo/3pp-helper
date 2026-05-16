@@ -8,10 +8,13 @@ import {
   defaultCorners,
   estimateVanishingPoints,
   resetVPSolver,
+  restoreVPs,
+  snapshotVPs,
   syncCuboid,
   translateBoxKeepingVPs,
 } from "./cuboid.js";
 import { drawAxisGrid, drawVP } from "./grid.js";
+import { clearHistory, commit, redo, undo } from "./history.js";
 import {
   boxCenter,
   boxHull,
@@ -88,6 +91,73 @@ function resetBox() {
   resetVPSolver();
   corners = defaultCorners(wc.x, wc.y, s);
   syncCuboid(corners, wc);
+}
+
+/**
+ * Snapshot of all "document state" — what undo/redo restores. Pan/zoom and
+ * transient UI (openHueLayerId, hover states) are deliberately excluded;
+ * they're not user-authored content.
+ *
+ * Layer image references are aliased, not cloned: HTMLImageElement is
+ * immutable bitmap data so sharing is safe and cheap.
+ */
+function snapshotState() {
+  return {
+    corners: corners.map((p) => ({ x: p.x, y: p.y })),
+    vps: snapshotVPs(),
+    layers: layers.map(cloneLayer),
+    spacing: spacingInput.value,
+  };
+}
+
+function cloneLayer(l) {
+  const out = { ...l };
+  if (l.pos) out.pos = { ...l.pos };
+  if (l.axes) out.axes = [...l.axes];
+  return out;
+}
+
+function restoreState(snap) {
+  corners = snap.corners.map((p) => ({ x: p.x, y: p.y }));
+  restoreVPs(snap.vps);
+  layers = snap.layers.map(cloneLayer);
+  spacingInput.value = snap.spacing;
+  spacingVal.textContent = snap.spacing;
+  openHueLayerId = null;
+  dragCorner = -1;
+  dragGizmoLayerId = null;
+  dragVPAxis = null;
+  pendingPreSnap = null;
+  pendingSliderSnap = null;
+  dragMoved = false;
+  renderLayerList();
+  draw();
+}
+
+// Commit the *pre-action* state into the undo stack. Always pair with
+// "snapshot first, then mutate" at the action site.
+function commitPre(snap) {
+  if (snap) commit(snap);
+}
+
+// Drag state: captured on pointerdown for any document-mutating drag; pushed
+// to history on pointerup only if a pointermove actually fired.
+let pendingPreSnap = null;
+let dragMoved = false;
+
+// Slider/color-picker state: captured on first "input", pushed on "change"
+// (which fires once at gesture end for both <input type="range"> and "color").
+let pendingSliderSnap = null;
+
+function beginSliderEdit() {
+  if (!pendingSliderSnap) pendingSliderSnap = snapshotState();
+}
+
+function endSliderEdit() {
+  if (pendingSliderSnap) {
+    commitPre(pendingSliderSnap);
+    pendingSliderSnap = null;
+  }
 }
 
 function screenToWorld(sx, sy) {
@@ -516,6 +586,8 @@ canvas.addEventListener("pointerdown", (e) => {
     dragVPAxis = vp.axis;
     vpDragSeed = vp.vps;
     hoveredLayerId = null;
+    pendingPreSnap = snapshotState();
+    dragMoved = false;
     canvas.setPointerCapture(e.pointerId);
     draw();
     return;
@@ -526,6 +598,8 @@ canvas.addEventListener("pointerdown", (e) => {
   if (corner >= 0) {
     dragCorner = corner;
     hoveredLayerId = null;
+    pendingPreSnap = snapshotState();
+    dragMoved = false;
     canvas.setPointerCapture(e.pointerId);
     draw();
     return;
@@ -537,11 +611,13 @@ canvas.addEventListener("pointerdown", (e) => {
     (hoveredLayerId && hitGizmo(sx, sy, hoveredLayerId) ? hoveredLayerId : null);
   if (layerId) {
     hoveredLayerId = layerId;
+    pendingPreSnap = snapshotState();
+    dragMoved = false;
     beginGizmoDrag(layerId, sx, sy, e.pointerId);
     return;
   }
 
-  // 4. Empty space → pan.
+  // 4. Empty space → pan. Pan/zoom isn't part of document history.
   hoveredLayerId = null;
   panning = true;
   panStart = v(sx, sy);
@@ -556,6 +632,7 @@ canvas.addEventListener("pointermove", (e) => {
 
   if (dragVPAxis) {
     applyVPDrag(corners, dragVPAxis, screenToWorld(sx, sy), vpDragSeed);
+    dragMoved = true;
     draw();
     return;
   }
@@ -563,6 +640,7 @@ canvas.addEventListener("pointermove", (e) => {
   if (dragCorner >= 0) {
     const { w, h } = viewSize();
     applyCornerDrag(corners, dragCorner, screenToWorld(sx, sy), principalPoint(w, h));
+    dragMoved = true;
     draw();
     return;
   }
@@ -583,6 +661,7 @@ canvas.addEventListener("pointermove", (e) => {
       }
       translateBoxKeepingVPs(corners, dx, dy);
     }
+    dragMoved = true;
     draw();
     return;
   }
@@ -619,6 +698,10 @@ canvas.addEventListener("pointermove", (e) => {
 });
 
 canvas.addEventListener("pointerup", () => {
+  // Push the pre-drag snapshot if a drag actually changed anything.
+  if (pendingPreSnap && dragMoved) commitPre(pendingPreSnap);
+  pendingPreSnap = null;
+  dragMoved = false;
   dragCorner = -1;
   dragGizmoLayerId = null;
   dragGizmoStart = null;
@@ -631,6 +714,9 @@ canvas.addEventListener("pointerup", () => {
 });
 
 canvas.addEventListener("pointercancel", () => {
+  // Cancel: don't commit a partial drag.
+  pendingPreSnap = null;
+  dragMoved = false;
   dragCorner = -1;
   dragGizmoLayerId = null;
   dragVPAxis = null;
@@ -663,11 +749,14 @@ canvas.addEventListener(
 );
 
 spacingInput.addEventListener("input", () => {
+  beginSliderEdit();
   spacingVal.textContent = spacingInput.value;
   draw();
 });
+spacingInput.addEventListener("change", endSliderEdit);
 
 resetBtn.addEventListener("click", () => {
+  commitPre(snapshotState());
   resetBox();
   draw();
 });
@@ -679,6 +768,7 @@ toggleBtn.addEventListener("click", () => {
 
 uploadInput.addEventListener("change", async (e) => {
   const files = Array.from(e.target.files || []);
+  if (files.length) commitPre(snapshotState());
   for (const file of files) {
     const url = URL.createObjectURL(file);
     const img = new Image();
@@ -740,10 +830,12 @@ function renderLayerList() {
       colorInput.value = layer.color;
       colorInput.className = "color-picker";
       colorInput.addEventListener("input", () => {
+        beginSliderEdit();
         layers = updateLayer(layers, layer.id, { color: colorInput.value });
         wrap.style.background = colorInput.value;
         draw();
       });
+      colorInput.addEventListener("change", endSliderEdit);
       wrap.appendChild(colorInput);
       head.appendChild(wrap);
     } else if (layer.type === "horizon") {
@@ -767,16 +859,19 @@ function renderLayerList() {
     actions.className = "layer-actions";
 
     const up = button("↑", () => {
+      commitPre(snapshotState());
       layers = moveLayer(layers, layer.id, +1);
       renderLayerList();
       draw();
     });
     const down = button("↓", () => {
+      commitPre(snapshotState());
       layers = moveLayer(layers, layer.id, -1);
       renderLayerList();
       draw();
     });
     const vis = button(layer.visible ? "●" : "○", () => {
+      commitPre(snapshotState());
       layers = updateLayer(layers, layer.id, { visible: !layer.visible });
       renderLayerList();
       draw();
@@ -788,6 +883,7 @@ function renderLayerList() {
 
     if (layer.type === "image") {
       const del = button("×", () => {
+        commitPre(snapshotState());
         layers = removeLayer(layers, layer.id);
         renderLayerList();
         draw();
@@ -808,11 +904,13 @@ function renderLayerList() {
     slider.step = "0.01";
     slider.value = String(layer.opacity);
     slider.addEventListener("input", () => {
+      beginSliderEdit();
       layers = updateLayer(layers, layer.id, { opacity: parseFloat(slider.value) });
       const lbl = opRow.querySelector("span");
       if (lbl) lbl.textContent = Math.round(parseFloat(slider.value) * 100) + "%";
       draw();
     });
+    slider.addEventListener("change", endSliderEdit);
     const opLbl = document.createElement("span");
     opLbl.textContent = Math.round(layer.opacity * 100) + "%";
     opRow.append(slider, opLbl);
@@ -828,6 +926,7 @@ function renderLayerList() {
       hueSlider.value = String(layer.hue ?? 0);
       hueSlider.className = "hue-slider";
       hueSlider.addEventListener("input", () => {
+        beginSliderEdit();
         const hue = parseInt(hueSlider.value, 10);
         const color = hueToColor(hue);
         layers = updateLayer(layers, layer.id, { hue, color });
@@ -849,6 +948,7 @@ function renderLayerList() {
         }
         draw();
       });
+      hueSlider.addEventListener("change", endSliderEdit);
       hueRow.appendChild(hueSlider);
       row.appendChild(hueRow);
     }
@@ -866,5 +966,33 @@ function button(text, onClick) {
   return b;
 }
 
+/**
+ * Undo / redo keyboard. Cmd/Ctrl+Z = undo, Cmd/Ctrl+Shift+Z (or Y) = redo.
+ * Skipped if the user is typing in a text input. Range/color inputs are still
+ * eligible because the sliders themselves don't capture keypresses we care
+ * about.
+ */
+window.addEventListener("keydown", (e) => {
+  const inText = e.target instanceof HTMLElement &&
+    (e.target.tagName === "INPUT" && /^(text|search|email|number|url|password)$/i.test(e.target.type) ||
+      e.target.tagName === "TEXTAREA" ||
+      e.target.isContentEditable);
+  if (inText) return;
+  const mod = e.metaKey || e.ctrlKey;
+  if (!mod) return;
+  const key = e.key.toLowerCase();
+  if (key === "z" && !e.shiftKey) {
+    e.preventDefault();
+    // Flush any in-flight slider commit so undo lands on a stable boundary.
+    endSliderEdit();
+    undo(snapshotState(), restoreState);
+  } else if ((key === "z" && e.shiftKey) || key === "y") {
+    e.preventDefault();
+    endSliderEdit();
+    redo(snapshotState(), restoreState);
+  }
+});
+
 renderLayerList();
 resize();
+clearHistory();
