@@ -443,7 +443,8 @@ function applyAt(corners, index, from, pos, t) {
   }
 }
 
-export function applyCornerDrag(corners, index, pos) {
+export function applyCornerDrag(corners, index, pos, opts = {}) {
+  if (opts.lockPerspective) return applyLockedCornerDrag(corners, index, pos);
   const snapC = snapshot(corners);
   const snapV = snapshotVPs();
   const from = { x: snapC[index].x, y: snapC[index].y };
@@ -475,6 +476,142 @@ export function applyCornerDrag(corners, index, pos) {
     restore(corners, snapC);
     restoreVPs(snapV);
   }
+}
+
+/**
+ * Drag a corner with the perspective *locked* — VPs stay fixed in world
+ * space; the corner drag only changes edge lengths.
+ *
+ * - c0:         translates the whole box (anchors re-aim toward the fixed
+ *               VPs, edges foreshorten naturally as c0 nears a VP).
+ * - c1/c2/c4:   the anchor slides along its existing c0→VP ray (project the
+ *               drag target onto that ray, clamp to keep `t` in (0, VP)).
+ * - c3/c5/c6:   the derived corner is the intersection of two perspective
+ *               lines from the two adjacent anchors. We solve back to those
+ *               anchors: each adjacent anchor sits on its own c0→VP ray and
+ *               also on the line from the drag target through the *other*
+ *               axis's VP. Two line intersections give the two new anchor
+ *               positions.
+ * - c7:         non-draggable (it's fully determined by the other corners).
+ *
+ * Binary-search clamps the drag fraction so `boxConfigValid` always holds.
+ */
+function applyLockedCornerDrag(corners, index, pos) {
+  if (index === 7) return; // c7 isn't a handle
+  const snapC = snapshot(corners);
+  const snapV = snapshotVPs();
+  const from = { x: snapC[index].x, y: snapC[index].y };
+
+  const trial = (t) => {
+    restore(corners, snapC);
+    restoreVPs(snapV);
+    const target = {
+      x: from.x + (pos.x - from.x) * t,
+      y: from.y + (pos.y - from.y) * t,
+    };
+    return applyLockedAt(corners, index, target);
+  };
+
+  if (trial(1) && boxConfigValid(corners)) return;
+
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < 24; i++) {
+    const mid = (lo + hi) / 2;
+    if (trial(mid) && boxConfigValid(corners)) lo = mid;
+    else hi = mid;
+  }
+  if (lo > 1e-4) {
+    trial(lo);
+    if (!boxConfigValid(corners)) {
+      restore(corners, snapC);
+      restoreVPs(snapV);
+    }
+  } else {
+    restore(corners, snapC);
+    restoreVPs(snapV);
+  }
+}
+
+// For each derived corner: list of [anchorToMove, anchorAxis, vpToShootFromTarget].
+// "Shoot from target" = the perspective line from the dragged-to point along
+// the other axis's VP — its intersection with the anchor's own ray gives the
+// anchor's new position.
+const LOCKED_DERIVED_TRIPLES = {
+  3: [[1, "x", "y"], [2, "y", "x"]],
+  5: [[1, "x", "z"], [4, "z", "x"]],
+  6: [[2, "y", "z"], [4, "z", "y"]],
+};
+
+function applyLockedAt(corners, index, target) {
+  if (!stableVPs) stableVPs = edgeVPs(corners);
+
+  if (index === 0) {
+    const dx = target.x - corners[0].x;
+    const dy = target.y - corners[0].y;
+    translateBoxKeepingVPs(corners, dx, dy);
+    return true;
+  }
+
+  const c0 = corners[0];
+
+  if (ANCHOR_CORNERS.includes(index)) {
+    const axisKey = AXIS_OF_ANCHOR[index];
+    const placed = placeAnchorOnRay(corners, index, axisKey, target);
+    if (!placed) return false;
+    rebuildDerivedCorners(corners, stableVPs.vx, stableVPs.vy, stableVPs.vz);
+    return true;
+  }
+
+  const triples = LOCKED_DERIVED_TRIPLES[index];
+  if (!triples) return false;
+  for (const [anchorIdx, ownAxis, shootAxis] of triples) {
+    const ownVP = stableVPs[`v${ownAxis}`];
+    const shootVP = stableVPs[`v${shootAxis}`];
+    if (!ownVP || !shootVP) return false;
+    const ownLineB = vpLineSecondPoint(c0, ownVP);
+    const shootLineB = vpLineSecondPoint(target, shootVP);
+    if (!ownLineB || !shootLineB) return false;
+    const hit = lineIntersect(c0, ownLineB, target, shootLineB);
+    if (!hit || !isFinitePoint(hit)) return false;
+    if (!placeAnchorOnRay(corners, anchorIdx, `v${ownAxis}`, hit)) return false;
+  }
+  rebuildDerivedCorners(corners, stableVPs.vx, stableVPs.vy, stableVPs.vz);
+  return true;
+}
+
+function placeAnchorOnRay(corners, anchorIdx, axisKey, target) {
+  const vp = stableVPs[axisKey];
+  if (!vp) return false;
+  const c0 = corners[0];
+  const dir = vpRayDir(c0, vp);
+  if (!dir) return false;
+  const t = (target.x - c0.x) * dir.x + (target.y - c0.y) * dir.y;
+  if (t < 1e-3) return false; // anchor would collapse to / behind c0
+  const maxT = vp.finite
+    ? Math.hypot(vp.p.x - c0.x, vp.p.y - c0.y) * ANCHOR_MAX_FRACTION
+    : Infinity;
+  const tFinal = Math.min(t, maxT);
+  corners[anchorIdx] = { x: c0.x + dir.x * tFinal, y: c0.y + dir.y * tFinal };
+  return true;
+}
+
+function vpRayDir(p, vp) {
+  if (!vp) return null;
+  if (vp.finite) {
+    const dx = vp.p.x - p.x;
+    const dy = vp.p.y - p.y;
+    const d = Math.hypot(dx, dy);
+    if (d < 1e-6) return null;
+    return { x: dx / d, y: dy / d };
+  }
+  return { x: vp.dir.x, y: vp.dir.y };
+}
+
+function vpLineSecondPoint(p, vp) {
+  if (!vp) return null;
+  if (vp.finite) return { x: vp.p.x, y: vp.p.y };
+  return { x: p.x + vp.dir.x, y: p.y + vp.dir.y };
 }
 
 /**

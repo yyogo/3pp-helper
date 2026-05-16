@@ -47,14 +47,54 @@
       padding: 10px;
     }
 
-    .section { margin-bottom: 14px; }
-    .section-label {
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: #888;
-      margin-bottom: 6px;
+    /* Collapsible toolbox sections (Grid / Wireframe / Perspective / References). */
+    .tb-section { margin-bottom: 12px; border: 1px solid #2a2a2a; border-radius: 4px; background: #1c1c1c; }
+    .tb-section-head {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 8px;
+      cursor: pointer;
+      user-select: none;
+      background: #1f1f1f;
+      border-radius: 4px 4px 0 0;
+      border-bottom: 1px solid #2a2a2a;
     }
+    .tb-section.collapsed .tb-section-head { border-bottom: 0; border-radius: 4px; }
+    .tb-section-toggle {
+      background: none;
+      border: 0;
+      color: #888;
+      font-size: 10px;
+      padding: 0 2px;
+      width: 14px;
+      cursor: pointer;
+    }
+    .tb-section-head strong { flex: 1; font-size: 12px; color: #ddd; text-transform: uppercase; letter-spacing: 0.04em; }
+    .tb-section-body { padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+    .tb-section.collapsed .tb-section-body { display: none; }
+    .tb-subhead { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.04em; margin-top: 4px; }
+
+    .tb-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .tb-row-name { flex: 1; font-size: 12px; color: #ddd; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tb-toggle {
+      background: none;
+      border: 0;
+      color: #ccc;
+      cursor: pointer;
+      font-size: 12px;
+      padding: 2px 4px;
+    }
+    .tb-toggle.off { color: #555; }
+    .tb-slider { flex: 1; min-width: 60px; }
+    .tb-slider-label { width: 64px; flex-shrink: 0; font-size: 11px; color: #888; }
+    .tb-slider-val { width: 44px; text-align: right; font-size: 11px; color: #888; flex-shrink: 0; }
+    .tb-presets { display: flex; gap: 4px; flex-wrap: wrap; }
+    .tb-presets button { font-size: 11px; padding: 3px 6px; }
 
     button {
       background: #2a2a2a;
@@ -70,37 +110,6 @@
 
     input[type="range"] { width: 100%; }
     input[type="file"] { display: none; }
-    .upload-btn { display: inline-block; }
-
-    .row {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .row + .row { margin-top: 4px; }
-
-    .layer {
-      padding: 8px;
-      border: 1px solid #2a2a2a;
-      border-radius: 3px;
-      margin-bottom: 6px;
-      background: #1f1f1f;
-    }
-    .layer-head {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      margin-bottom: 6px;
-    }
-    .layer-name {
-      flex: 1;
-      font-size: 12px;
-      color: #ddd;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .layer.hidden .layer-name { color: #555; }
     .swatch {
       position: relative;
       display: inline-block;
@@ -161,30 +170,6 @@
       border: 2px solid #1a1a1a;
       cursor: grab;
     }
-    .layer-actions {
-      display: flex;
-      gap: 2px;
-    }
-    .opacity-row {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 11px;
-      color: #888;
-    }
-    .opacity-row span { width: 24px; text-align: right; }
-
-    .vp-slider-row {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      margin-top: 4px;
-      font-size: 11px;
-      color: #888;
-    }
-    .vp-slider-label { width: 44px; flex-shrink: 0; }
-    .vp-slider-val { width: 46px; text-align: right; flex-shrink: 0; }
-
     .hint { color: #666; font-size: 11px; margin-top: 4px; }
 
     .modal { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 10; }
@@ -241,28 +226,8 @@
       </div>
     </div>
     <div class="toolbox-body">
-      <div class="section">
-        <div class="section-label">Ray count</div>
-        <div class="row">
-          <input type="range" id="spacing" min="2" max="96" value="8" />
-          <span id="spacing-val" style="width:24px;text-align:right;">8</span>
-        </div>
-      </div>
-
-      <div class="section">
-        <div class="section-label">Reference images</div>
-        <label class="upload-btn">
-          <input type="file" id="upload" accept="image/*" multiple />
-          <button type="button" onclick="document.getElementById('upload').click()">+ Load image…</button>
-        </label>
-      </div>
-
-      <div class="section">
-        <div class="section-label">Layers (top = front)</div>
-        <div id="layers-list"></div>
-      </div>
-
-      <div class="hint">Drag corners · gizmo on hover · scroll = zoom · empty drag = pan</div>
+      <div id="toolbox-sections"></div>
+      <div class="hint">Drag corners · gizmo on hover · scroll = zoom · empty drag = pan · ⌘Z undo</div>
     </div>
   </aside>
   <div id="help-modal" class="modal" hidden>

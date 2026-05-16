@@ -35,15 +35,15 @@ import {
 
 const canvas = document.getElementById("view");
 const ctx = canvas.getContext("2d");
-const spacingInput = document.getElementById("spacing");
-const spacingVal = document.getElementById("spacing-val");
+// Module-level "loose" UI state that isn't naturally part of a layer.
+let divisions = 8;
+const sectionsOpen = { grid: true, wireframe: true, perspective: true, references: true };
 const resetBtn = document.getElementById("reset-btn");
 const toggleBtn = document.getElementById("toggle-toolbox");
 const helpBtn = document.getElementById("help-btn");
 const helpModal = document.getElementById("help-modal");
 const toolbox = document.getElementById("toolbox");
-const uploadInput = document.getElementById("upload");
-const layersList = document.getElementById("layers-list");
+const toolboxSections = document.getElementById("toolbox-sections");
 
 const HIT_RADIUS_PX = 12;
 const GIZMO_RADIUS_PX = 14;
@@ -124,7 +124,7 @@ function snapshotState() {
     corners: corners.map((p) => ({ x: p.x, y: p.y })),
     vps: snapshotVPs(),
     layers: layers.map(cloneLayer),
-    spacing: spacingInput.value,
+    divisions,
   };
 }
 
@@ -139,8 +139,7 @@ function restoreState(snap) {
   corners = snap.corners.map((p) => ({ x: p.x, y: p.y }));
   restoreVPs(snap.vps);
   layers = snap.layers.map(cloneLayer);
-  spacingInput.value = snap.spacing;
-  spacingVal.textContent = snap.spacing;
+  divisions = snap.divisions ?? 8;
   openHueLayerId = null;
   dragCorner = -1;
   dragGizmoLayerId = null;
@@ -148,7 +147,7 @@ function restoreState(snap) {
   pendingPreSnap = null;
   pendingSliderSnap = null;
   dragMoved = false;
-  renderLayerList();
+  renderToolbox();
   draw();
 }
 
@@ -316,7 +315,7 @@ function drawBoxLayer(layer, vps, lineScale, handleScale, hovered) {
   // partition the silhouette cleanly into 1–3 non-overlapping regions, which
   // both communicates orientation and avoids the "fill everything = solid
   // box" pitfall you get when both sides paint over each other.
-  const front = visibleFaces(corners, vps);
+  const front = layer.showFaces === false ? [] : visibleFaces(corners, vps);
   if (front.length) {
     ctx.save();
     ctx.globalAlpha = ctx.globalAlpha * 0.35;
@@ -565,7 +564,6 @@ function draw() {
   const lineScale = 1 / zoom;
   const handleScale = 1 / zoom;
   const vps = estimateVanishingPoints(corners, principalPoint(w, h));
-  const divisions = parseInt(spacingInput.value, 10) || 8;
   // Grids and box-edge clipping use the same viewport rect so they extend
   // exactly to the visible region (plus a small margin) regardless of pan.
   const gridRect = viewportWorldRect(w, h, 200);
@@ -846,8 +844,10 @@ canvas.addEventListener("pointermove", (e) => {
   }
 
   if (dragCorner >= 0) {
-    const { w, h } = viewSize();
-    applyCornerDrag(corners, dragCorner, screenToWorld(sx, sy), principalPoint(w, h));
+    const boxLayer = layers.find((l) => l.type === "box");
+    applyCornerDrag(corners, dragCorner, screenToWorld(sx, sy), {
+      lockPerspective: !!boxLayer?.lockPerspective,
+    });
     dragMoved = true;
     draw();
     return;
@@ -979,16 +979,10 @@ canvas.addEventListener(
   { passive: false },
 );
 
-spacingInput.addEventListener("input", () => {
-  beginSliderEdit();
-  spacingVal.textContent = spacingInput.value;
-  draw();
-});
-spacingInput.addEventListener("change", endSliderEdit);
-
 resetBtn.addEventListener("click", () => {
   commitPre(snapshotState());
   resetBox();
+  renderToolbox();
   draw();
 });
 
@@ -1010,9 +1004,9 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !helpModal.hidden) helpModal.hidden = true;
 });
 
-uploadInput.addEventListener("change", async (e) => {
-  const files = Array.from(e.target.files || []);
-  if (files.length) commitPre(snapshotState());
+async function handleImageUpload(files) {
+  if (!files.length) return;
+  commitPre(snapshotState());
   for (const file of files) {
     const url = URL.createObjectURL(file);
     const img = new Image();
@@ -1027,11 +1021,10 @@ uploadInput.addEventListener("change", async (e) => {
       h: h / zoom,
     });
     layers = [layer, ...layers]; // bottom = drawn first
-    renderLayerList();
+    renderToolbox();
     draw();
   }
-  uploadInput.value = "";
-});
+}
 
 // ResizeObserver fires on any layout change to the canvas's flex parent
 // (window resize, toolbox collapse/expand, etc.). The window-resize listener
@@ -1042,233 +1035,434 @@ if (typeof ResizeObserver !== "undefined") {
   window.addEventListener("resize", resize);
 }
 
-// ----- Layer list UI -----
+// ----- Toolbox UI -----
 
-function renderLayerList() {
-  layersList.innerHTML = "";
-  // Show top→bottom (last in array = top visually = first in list)
-  const display = [...layers].reverse();
-  for (const layer of display) {
-    const row = document.createElement("div");
-    row.className = "layer" + (layer.visible ? "" : " hidden");
-    row.dataset.id = layer.id;
+function renderToolbox() {
+  toolboxSections.innerHTML = "";
+  toolboxSections.append(
+    sectionEl("grid", "Grid", buildGridSection()),
+    sectionEl("wireframe", "Wireframe / Box", buildWireframeSection()),
+    sectionEl("perspective", "Perspective", buildPerspectiveSection()),
+    sectionEl("references", "References", buildReferencesSection()),
+  );
+}
 
-    const head = document.createElement("div");
-    head.className = "layer-head";
+function sectionEl(key, title, content) {
+  const sect = document.createElement("div");
+  sect.className = "tb-section" + (sectionsOpen[key] ? "" : " collapsed");
+  const head = document.createElement("div");
+  head.className = "tb-section-head";
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "tb-section-toggle";
+  toggle.textContent = sectionsOpen[key] ? "▾" : "▸";
+  const lbl = document.createElement("strong");
+  lbl.textContent = title;
+  head.append(toggle, lbl);
+  head.addEventListener("click", () => {
+    sectionsOpen[key] = !sectionsOpen[key];
+    sect.classList.toggle("collapsed");
+    toggle.textContent = sectionsOpen[key] ? "▾" : "▸";
+  });
+  const body = document.createElement("div");
+  body.className = "tb-section-body";
+  for (const node of content) body.appendChild(node);
+  sect.append(head, body);
+  return sect;
+}
 
-    let swatch = null;
-    if (layer.type === "grid" || layer.type === "box" || layer.type === "vp-triangle") {
-      swatch = document.createElement("button");
-      swatch.type = "button";
-      swatch.className = "swatch";
-      swatch.style.background = layer.color;
-      swatch.title = "Click to change color";
-      swatch.addEventListener("click", (e) => {
-        e.stopPropagation();
-        openHueLayerId = openHueLayerId === layer.id ? null : layer.id;
-        renderLayerList();
-      });
-      head.appendChild(swatch);
-    } else if (layer.type === "background") {
-      // Background uses a native color picker rather than a hue slider, so
-      // the user can also pick neutral / off-gamut shades (white, gray, etc.).
-      const wrap = document.createElement("label");
-      wrap.className = "swatch";
-      wrap.style.background = layer.color;
-      wrap.title = "Click to change background color";
-      const colorInput = document.createElement("input");
-      colorInput.type = "color";
-      colorInput.value = layer.color;
-      colorInput.className = "color-picker";
-      colorInput.addEventListener("input", () => {
-        beginSliderEdit();
-        layers = updateLayer(layers, layer.id, { color: colorInput.value });
-        wrap.style.background = colorInput.value;
-        draw();
-      });
-      colorInput.addEventListener("change", endSliderEdit);
-      wrap.appendChild(colorInput);
-      head.appendChild(wrap);
-    } else if (layer.type === "horizon") {
-      // Static gradient indicator — color is derived from the two grid layers
-      // so this swatch isn't interactive.
-      const colA = gridLayerColor(layer.axes[0]);
-      const colB = gridLayerColor(layer.axes[1]);
-      const grad = document.createElement("span");
-      grad.className = "swatch";
-      grad.style.background = `linear-gradient(90deg, ${colA}, ${colB})`;
-      grad.style.cursor = "default";
-      head.appendChild(grad);
-    }
+// --- Section builders ---
 
-    const name = document.createElement("span");
-    name.className = "layer-name";
-    name.textContent = layer.name;
-    head.appendChild(name);
-
-    const actions = document.createElement("div");
-    actions.className = "layer-actions";
-
-    const up = button("↑", () => {
-      commitPre(snapshotState());
-      layers = moveLayer(layers, layer.id, +1);
-      renderLayerList();
-      draw();
-    });
-    const down = button("↓", () => {
-      commitPre(snapshotState());
-      layers = moveLayer(layers, layer.id, -1);
-      renderLayerList();
-      draw();
-    });
-    const vis = button(layer.visible ? "●" : "○", () => {
-      commitPre(snapshotState());
-      layers = updateLayer(layers, layer.id, { visible: !layer.visible });
-      renderLayerList();
-      draw();
-    });
-    up.title = "Move up";
-    down.title = "Move down";
-    vis.title = layer.visible ? "Hide" : "Show";
-    actions.append(up, down, vis);
-
-    if (layer.type === "image") {
-      const del = button("×", () => {
-        commitPre(snapshotState());
-        layers = removeLayer(layers, layer.id);
-        renderLayerList();
-        draw();
-      });
-      del.title = "Remove";
-      actions.appendChild(del);
-    }
-
-    head.appendChild(actions);
-    row.appendChild(head);
-
-    const opRow = document.createElement("div");
-    opRow.className = "opacity-row";
-    const slider = document.createElement("input");
-    slider.type = "range";
-    slider.min = "0";
-    slider.max = "1";
-    slider.step = "0.01";
-    slider.value = String(layer.opacity);
-    slider.addEventListener("input", () => {
+function buildGridSection() {
+  const out = [];
+  out.push(simpleSlider({
+    label: "Ray count",
+    min: 2, max: 96, step: 1, value: divisions,
+    fmt: (v) => String(Math.round(v)),
+    onInput: (v) => {
       beginSliderEdit();
-      layers = updateLayer(layers, layer.id, { opacity: parseFloat(slider.value) });
-      const lbl = opRow.querySelector("span");
-      if (lbl) lbl.textContent = Math.round(parseFloat(slider.value) * 100) + "%";
+      divisions = Math.round(v);
+      draw();
+    },
+  }));
+  for (const axis of ["x", "y", "z"]) {
+    const layer = layers.find((l) => l.type === "grid" && l.axis === axis);
+    if (layer) out.push(...layerCard(layer));
+  }
+  return out;
+}
+
+function buildWireframeSection() {
+  const out = [];
+  const box = layers.find((l) => l.type === "box");
+  if (box) {
+    out.push(...layerCard(box, { extraToggles: ["showFaces", "lockPerspective"] }));
+  }
+  const bg = layers.find((l) => l.type === "background");
+  if (bg) out.push(backgroundRow(bg));
+  return out;
+}
+
+function buildPerspectiveSection() {
+  const out = [];
+  out.push(presetsRow());
+  for (const axis of ["x", "y", "z"]) {
+    out.push(vpControlBlock(axis));
+  }
+  const tri = layers.find((l) => l.type === "vp-triangle");
+  if (tri) out.push(...layerCard(tri));
+  const horizons = layers.filter((l) => l.type === "horizon");
+  if (horizons.length) {
+    const sub = document.createElement("div");
+    sub.className = "tb-subhead";
+    sub.textContent = "Horizons";
+    out.push(sub);
+    for (const h of horizons) out.push(horizonRow(h));
+  }
+  return out;
+}
+
+function buildReferencesSection() {
+  const out = [uploadRow()];
+  const images = layers.filter((l) => l.type === "image");
+  for (const img of images) out.push(...layerCard(img, { removable: true }));
+  if (!images.length) {
+    const hint = document.createElement("div");
+    hint.className = "hint";
+    hint.style.fontStyle = "italic";
+    hint.textContent = "No reference images yet.";
+    out.push(hint);
+  }
+  return out;
+}
+
+// --- Generic layer card (head row + opacity row + extras + hue popover) ---
+
+function layerCard(layer, opts = {}) {
+  const out = [];
+  const head = document.createElement("div");
+  head.className = "tb-row";
+  const swatch = makeSwatch(layer);
+  if (swatch) head.appendChild(swatch);
+  const name = document.createElement("span");
+  name.className = "tb-row-name";
+  name.textContent = layer.name;
+  if (!layer.visible) name.style.color = "#555";
+  head.append(name, makeVisibilityToggle(layer));
+  if (opts.removable) head.appendChild(makeRemoveButton(layer));
+  out.push(head);
+  out.push(makeOpacityRow(layer));
+  for (const key of opts.extraToggles || []) {
+    out.push(makeBoolToggleRow(layer, key, TOGGLE_LABELS[key] ?? key));
+  }
+  if (swatch && openHueLayerId === layer.id) out.push(makeHueRow(layer, swatch));
+  return out;
+}
+
+const TOGGLE_LABELS = { showFaces: "Show faces", lockPerspective: "Lock perspective" };
+
+function makeSwatch(layer) {
+  if (!["grid", "box", "vp-triangle"].includes(layer.type)) return null;
+  const swatch = document.createElement("button");
+  swatch.type = "button";
+  swatch.className = "swatch";
+  swatch.style.background = layer.color;
+  swatch.dataset.swatchFor = layer.id;
+  swatch.title = "Click to change color";
+  swatch.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openHueLayerId = openHueLayerId === layer.id ? null : layer.id;
+    renderToolbox();
+  });
+  return swatch;
+}
+
+function makeVisibilityToggle(layer) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "tb-toggle" + (layer.visible ? "" : " off");
+  btn.textContent = layer.visible ? "●" : "○";
+  btn.title = layer.visible ? "Hide" : "Show";
+  btn.addEventListener("click", () => {
+    commitPre(snapshotState());
+    layers = updateLayer(layers, layer.id, { visible: !layer.visible });
+    renderToolbox();
+    draw();
+  });
+  return btn;
+}
+
+function makeRemoveButton(layer) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "tb-toggle";
+  btn.textContent = "×";
+  btn.title = "Remove";
+  btn.addEventListener("click", () => {
+    commitPre(snapshotState());
+    layers = removeLayer(layers, layer.id);
+    renderToolbox();
+    draw();
+  });
+  return btn;
+}
+
+function makeOpacityRow(layer) {
+  return simpleSlider({
+    label: "Opacity",
+    min: 0, max: 1, step: 0.01, value: layer.opacity,
+    fmt: (v) => Math.round(v * 100) + "%",
+    onInput: (v) => {
+      beginSliderEdit();
+      layers = updateLayer(layers, layer.id, { opacity: v });
+      draw();
+    },
+  });
+}
+
+function makeBoolToggleRow(layer, key, label) {
+  const row = document.createElement("div");
+  row.className = "tb-row";
+  const lbl = document.createElement("span");
+  lbl.className = "tb-row-name";
+  lbl.textContent = label;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "tb-toggle" + (layer[key] ? "" : " off");
+  btn.textContent = layer[key] ? "●" : "○";
+  btn.addEventListener("click", () => {
+    commitPre(snapshotState());
+    layers = updateLayer(layers, layer.id, { [key]: !layer[key] });
+    renderToolbox();
+    draw();
+  });
+  row.append(lbl, btn);
+  return row;
+}
+
+function makeHueRow(layer, swatchEl) {
+  const row = document.createElement("div");
+  row.className = "hue-row";
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.className = "hue-slider";
+  slider.min = "0";
+  slider.max = "360";
+  slider.value = String(layer.hue ?? 0);
+  slider.addEventListener("input", () => {
+    beginSliderEdit();
+    const hue = parseInt(slider.value, 10);
+    const color = hueToColor(hue);
+    layers = updateLayer(layers, layer.id, { hue, color });
+    if (swatchEl) swatchEl.style.background = color;
+    // Grid hue change cascades into horizon-gradient swatches (which derive
+    // their colors from the two grid layers). Patch them in place to avoid
+    // a full re-render mid-drag.
+    if (layer.type === "grid") {
+      for (const hLayer of layers.filter((l) => l.type === "horizon")) {
+        const sw = document.querySelector(`[data-horizon-for="${hLayer.id}"]`);
+        if (sw) {
+          const cA = gridLayerColor(hLayer.axes[0]);
+          const cB = gridLayerColor(hLayer.axes[1]);
+          sw.style.background = `linear-gradient(90deg, ${cA}, ${cB})`;
+        }
+      }
+    }
+    draw();
+  });
+  slider.addEventListener("change", endSliderEdit);
+  row.appendChild(slider);
+  return row;
+}
+
+// --- Background row (native color picker) ---
+
+function backgroundRow(layer) {
+  const row = document.createElement("div");
+  row.className = "tb-row";
+  const wrap = document.createElement("label");
+  wrap.className = "swatch";
+  wrap.style.background = layer.color;
+  wrap.title = "Background color";
+  const input = document.createElement("input");
+  input.type = "color";
+  input.value = layer.color;
+  input.className = "color-picker";
+  input.addEventListener("input", () => {
+    beginSliderEdit();
+    layers = updateLayer(layers, layer.id, { color: input.value });
+    wrap.style.background = input.value;
+    draw();
+  });
+  input.addEventListener("change", endSliderEdit);
+  wrap.appendChild(input);
+  const name = document.createElement("span");
+  name.className = "tb-row-name";
+  name.textContent = "Background";
+  row.append(wrap, name, makeVisibilityToggle(layer));
+  return row;
+}
+
+// --- Horizon row (gradient swatch derived from grid colors, visibility-only) ---
+
+function horizonRow(layer) {
+  const row = document.createElement("div");
+  row.className = "tb-row";
+  const sw = document.createElement("span");
+  sw.className = "swatch";
+  sw.style.cursor = "default";
+  sw.dataset.horizonFor = layer.id;
+  const cA = gridLayerColor(layer.axes[0]);
+  const cB = gridLayerColor(layer.axes[1]);
+  sw.style.background = `linear-gradient(90deg, ${cA}, ${cB})`;
+  const name = document.createElement("span");
+  name.className = "tb-row-name";
+  name.textContent = layer.name;
+  row.append(sw, name, makeVisibilityToggle(layer));
+  return row;
+}
+
+// --- VP control block (angle + 1/dist sliders per axis) ---
+
+function vpControlBlock(axis) {
+  const wrap = document.createElement("div");
+  const head = document.createElement("div");
+  head.className = "tb-subhead";
+  head.textContent = `V${axis}`;
+  head.style.color = gridLayerColor(axis);
+  wrap.appendChild(head);
+  const polar = vpPolar(snapshotVPs()?.[`v${axis}`], corners[0]);
+  wrap.appendChild(simpleSlider({
+    id: `vp-angle-${axis}`,
+    label: "Angle",
+    min: -180, max: 180, step: 1, value: (polar.angle * 180) / Math.PI,
+    fmt: (v) => `${Math.round(v)}°`,
+    onInput: (v) => {
+      beginSliderEdit();
+      const cur = vpPolar(snapshotVPs()?.[`v${axis}`], corners[0]);
+      setVPPolar(corners, axis, (v * Math.PI) / 180, cur.invDist);
+      draw();
+    },
+  }));
+  wrap.appendChild(simpleSlider({
+    id: `vp-invdist-${axis}`,
+    label: "1 / dist",
+    min: 0, max: 0.01, step: 0.00002, value: polar.invDist,
+    fmt: (v) => v < 1e-6 ? "∞" : Math.round(1 / v) + "px",
+    onInput: (v) => {
+      beginSliderEdit();
+      const cur = vpPolar(snapshotVPs()?.[`v${axis}`], corners[0]);
+      setVPPolar(corners, axis, cur.angle, v);
+      draw();
+    },
+  }));
+  return wrap;
+}
+
+// --- Preset buttons ---
+
+function presetsRow() {
+  const row = document.createElement("div");
+  row.className = "tb-presets";
+  const presets = [
+    { label: "Default", apply: () => resetBox() },
+    { label: "Ortho", apply: () => applyPresetOrthographic() },
+    { label: "2-pt", apply: () => applyPresetTwoPoint() },
+    { label: "1-pt", apply: () => applyPresetOnePoint() },
+  ];
+  for (const p of presets) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = p.label;
+    btn.addEventListener("click", () => {
+      commitPre(snapshotState());
+      p.apply();
+      renderToolbox();
       draw();
     });
-    slider.addEventListener("change", endSliderEdit);
-    const opLbl = document.createElement("span");
-    opLbl.textContent = Math.round(layer.opacity * 100) + "%";
-    opRow.append(slider, opLbl);
-    row.appendChild(opRow);
+    row.appendChild(btn);
+  }
+  return row;
+}
 
-    // Per-grid VP controls: angle and 1/distance from c0. invDist=0 sends the
-    // VP to infinity, collapsing perspective along that axis to orthographic.
-    if (layer.type === "grid") {
-      const polar = vpPolar(snapshotVPs()?.[`v${layer.axis}`], corners[0]);
-      const angleRow = makeVPSlider({
-        id: `vp-angle-${layer.axis}`,
-        label: "Angle",
-        min: -180,
-        max: 180,
-        step: 1,
-        value: (polar.angle * 180) / Math.PI,
-        fmt: (v) => `${Math.round(v)}°`,
-        onInput: (v) => {
-          beginSliderEdit();
-          const current = vpPolar(snapshotVPs()?.[`v${layer.axis}`], corners[0]);
-          setVPPolar(corners, layer.axis, (v * Math.PI) / 180, current.invDist);
-          draw();
-        },
-      });
-      const distRow = makeVPSlider({
-        id: `vp-invdist-${layer.axis}`,
-        label: "1 / dist",
-        min: 0,
-        max: 0.01,
-        step: 0.00002,
-        value: polar.invDist,
-        fmt: (v) => v < 1e-6 ? "∞" : Math.round(1 / v) + "px",
-        onInput: (v) => {
-          beginSliderEdit();
-          const current = vpPolar(snapshotVPs()?.[`v${layer.axis}`], corners[0]);
-          setVPPolar(corners, layer.axis, current.angle, v);
-          draw();
-        },
-      });
-      row.appendChild(angleRow);
-      row.appendChild(distRow);
-    }
-
-    if (swatch && openHueLayerId === layer.id) {
-      const hueRow = document.createElement("div");
-      hueRow.className = "hue-row";
-      const hueSlider = document.createElement("input");
-      hueSlider.type = "range";
-      hueSlider.min = "0";
-      hueSlider.max = "360";
-      hueSlider.value = String(layer.hue ?? 0);
-      hueSlider.className = "hue-slider";
-      hueSlider.addEventListener("input", () => {
-        beginSliderEdit();
-        const hue = parseInt(hueSlider.value, 10);
-        const color = hueToColor(hue);
-        layers = updateLayer(layers, layer.id, { hue, color });
-        swatch.style.background = color;
-        // Refresh dependent horizon-layer swatches if this is a grid color.
-        if (layer.type === "grid") {
-          for (const row of layersList.querySelectorAll(".layer")) {
-            const id = row.dataset.id;
-            const l = layers.find((x) => x.id === id);
-            if (l?.type === "horizon") {
-              const sw = row.querySelector(".swatch");
-              if (sw) {
-                const cA = gridLayerColor(l.axes[0]);
-                const cB = gridLayerColor(l.axes[1]);
-                sw.style.background = `linear-gradient(90deg, ${cA}, ${cB})`;
-              }
-            }
-          }
-        }
-        draw();
-      });
-      hueSlider.addEventListener("change", endSliderEdit);
-      hueRow.appendChild(hueSlider);
-      row.appendChild(hueRow);
-    }
-
-    layersList.appendChild(row);
+/**
+ * Presets preserve the current VP angles (so the box stays roughly oriented
+ * the way the user had it) and only toggle invDist to 0 for the appropriate
+ * axes. Default is a full box reset.
+ */
+function applyPresetOrthographic() {
+  const vps = snapshotVPs();
+  if (!vps) return;
+  for (const axis of ["x", "y", "z"]) {
+    const p = vpPolar(vps[`v${axis}`], corners[0]);
+    setVPPolar(corners, axis, p.angle, 0);
   }
 }
 
-function makeVPSlider({ id, label, min, max, step, value, fmt, onInput }) {
+function applyPresetTwoPoint() {
+  const vps = snapshotVPs();
+  if (!vps) return;
+  const p = vpPolar(vps.vz, corners[0]);
+  setVPPolar(corners, "z", p.angle, 0);
+}
+
+function applyPresetOnePoint() {
+  const vps = snapshotVPs();
+  if (!vps) return;
+  for (const axis of ["x", "z"]) {
+    const p = vpPolar(vps[`v${axis}`], corners[0]);
+    setVPPolar(corners, axis, p.angle, 0);
+  }
+}
+
+// --- Image upload row ---
+
+function uploadRow() {
+  const wrap = document.createElement("div");
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "image/*";
+  input.multiple = true;
+  input.style.display = "none";
+  input.addEventListener("change", (e) => {
+    handleImageUpload(Array.from(e.target.files || []));
+    input.value = "";
+  });
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.textContent = "+ Load image…";
+  btn.style.width = "100%";
+  btn.addEventListener("click", () => input.click());
+  wrap.append(input, btn);
+  return wrap;
+}
+
+// --- Generic slider row ---
+
+function simpleSlider({ label, min, max, step, value, fmt, onInput, id }) {
   const row = document.createElement("div");
-  row.className = "vp-slider-row";
+  row.className = "tb-row";
   const lbl = document.createElement("span");
-  lbl.className = "vp-slider-label";
+  lbl.className = "tb-slider-label";
   lbl.textContent = label;
   const slider = document.createElement("input");
   slider.type = "range";
-  slider.id = id;
+  slider.className = "tb-slider";
+  if (id) slider.id = id;
   slider.min = String(min);
   slider.max = String(max);
   slider.step = String(step);
   slider.value = String(value);
-  const valLbl = document.createElement("span");
-  valLbl.className = "vp-slider-val";
-  valLbl.textContent = fmt(value);
+  const valEl = document.createElement("span");
+  valEl.className = "tb-slider-val";
+  valEl.textContent = fmt(value);
   slider.addEventListener("input", () => {
     const v = parseFloat(slider.value);
-    valLbl.textContent = fmt(v);
+    valEl.textContent = fmt(v);
     onInput(v);
   });
   slider.addEventListener("change", endSliderEdit);
-  row.append(lbl, slider, valLbl);
+  row.append(lbl, slider, valEl);
   return row;
 }
 
@@ -1287,25 +1481,16 @@ function syncVPSliders() {
     const angleEl = document.getElementById(`vp-angle-${axis}`);
     if (angleEl && angleEl !== active) {
       angleEl.value = String((polar.angle * 180) / Math.PI);
-      const val = angleEl.parentElement?.querySelector(".vp-slider-val");
+      const val = angleEl.parentElement?.querySelector(".tb-slider-val");
       if (val) val.textContent = `${Math.round((polar.angle * 180) / Math.PI)}°`;
     }
     const distEl = document.getElementById(`vp-invdist-${axis}`);
     if (distEl && distEl !== active) {
       distEl.value = String(polar.invDist);
-      const val = distEl.parentElement?.querySelector(".vp-slider-val");
+      const val = distEl.parentElement?.querySelector(".tb-slider-val");
       if (val) val.textContent = polar.invDist < 1e-6 ? "∞" : Math.round(1 / polar.invDist) + "px";
     }
   }
-}
-
-function button(text, onClick) {
-  const b = document.createElement("button");
-  b.type = "button";
-  b.className = "icon";
-  b.textContent = text;
-  b.addEventListener("click", onClick);
-  return b;
 }
 
 /**
@@ -1335,6 +1520,6 @@ window.addEventListener("keydown", (e) => {
   }
 });
 
-renderLayerList();
+renderToolbox();
 resize();
 clearHistory();

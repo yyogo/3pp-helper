@@ -56,6 +56,8 @@ export function createDefaultLayers() {
       opacity: 1,
       hue: 0,
       color: "hsl(0, 0%, 92%)",
+      showFaces: true,
+      lockPerspective: false,
     },
   ];
 }
