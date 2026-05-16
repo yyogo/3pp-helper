@@ -7,6 +7,7 @@ import {
   v,
   vanishingPointFromEdges,
   vpFinite,
+  vpInfinite,
 } from "./geom.js";
 
 /** Corner index = x | (y<<1) | (z<<2) */
@@ -43,37 +44,66 @@ export const FACES = [
 ];
 
 /**
- * One visible face per axis (always 3 total). For each axis we have two
- * parallel faces; the visible one is the one *opposite* the vanishing point,
- * i.e. on the camera-side. With a finite VP that's whichever face centroid
- * is farther from the VP; with a VP at infinity, the centroid with the
- * smaller projection onto the VP direction (= "less far away in that
- * direction" = camera-side).
+ * Up to one visible face per axis. With a finite VP, the visible face is the
+ * one opposite the VP (i.e. its centroid is farther from the VP). With a VP
+ * at infinity (orthographic along that axis), parallel-rays projection means
+ * the two faces overlap in screen depth, so we use a different test: the
+ * "horizon" for axis k is the line through the other two VPs, and the
+ * visible face is whichever centroid is closer to that horizon — but only
+ * if both centroids lie on the same side of it. If the box straddles the
+ * horizon, neither face is visible (the box is edge-on to the orthographic
+ * sight-line and both perpendicular faces are at grazing angles).
  */
 export function visibleFaces(corners, vps) {
   const out = [];
   // FACES is laid out so consecutive pairs share an axis: [0,1]=z, [2,3]=x, [4,5]=y.
-  const pairs = [[0, 1, "vz"], [2, 3, "vx"], [4, 5, "vy"]];
-  for (const [aIdx, bIdx, vpKey] of pairs) {
+  const pairs = [
+    [0, 1, "vz", "vx", "vy"],
+    [2, 3, "vx", "vy", "vz"],
+    [4, 5, "vy", "vx", "vz"],
+  ];
+  for (const [aIdx, bIdx, vpKey, hKeyA, hKeyB] of pairs) {
     const vp = vps?.[vpKey];
     if (!vp) continue;
     const fa = FACES[aIdx];
     const fb = FACES[bIdx];
     const ca = quadCentroid(corners, fa.corners);
     const cb = quadCentroid(corners, fb.corners);
-    let pickB;
     if (vp.finite) {
       const da2 = (ca.x - vp.p.x) ** 2 + (ca.y - vp.p.y) ** 2;
       const db2 = (cb.x - vp.p.x) ** 2 + (cb.y - vp.p.y) ** 2;
-      pickB = db2 > da2;
-    } else {
-      const pa = ca.x * vp.dir.x + ca.y * vp.dir.y;
-      const pb = cb.x * vp.dir.x + cb.y * vp.dir.y;
-      pickB = pb < pa;
+      out.push(db2 > da2 ? fb : fa);
+      continue;
     }
-    out.push(pickB ? fb : fa);
+    // Orthographic case: horizon is the line through the other two VPs.
+    const horizon = horizonLine(vps?.[hKeyA], vps?.[hKeyB]);
+    if (!horizon) continue;
+    const dA = signedDistToLine(ca, horizon);
+    const dB = signedDistToLine(cb, horizon);
+    // Straddling the horizon → both faces are edge-on, neither visible.
+    if (Math.sign(dA) * Math.sign(dB) < 0 && Math.abs(dA) > 1e-6 && Math.abs(dB) > 1e-6) continue;
+    out.push(Math.abs(dA) < Math.abs(dB) ? fa : fb);
   }
   return out;
+}
+
+// Horizon for an axis = line through the two other VPs. Defined as long as
+// at least one of them is finite; degenerates when both are at infinity.
+function horizonLine(vpA, vpB) {
+  if (vpA?.finite && vpB?.finite) {
+    return { p: vpA.p, dir: { x: vpB.p.x - vpA.p.x, y: vpB.p.y - vpA.p.y } };
+  }
+  if (vpA?.finite && vpB && !vpB.finite) return { p: vpA.p, dir: vpB.dir };
+  if (vpB?.finite && vpA && !vpA.finite) return { p: vpB.p, dir: vpA.dir };
+  return null;
+}
+
+function signedDistToLine(point, line) {
+  const nx = -line.dir.y;
+  const ny = line.dir.x;
+  const len = Math.hypot(nx, ny);
+  if (len < 1e-9) return 0;
+  return ((point.x - line.p.x) * nx + (point.y - line.p.y) * ny) / len;
 }
 
 function quadCentroid(corners, idx) {
@@ -251,6 +281,52 @@ export function syncCuboid(corners) {
   return { ...stableVPs };
 }
 
+/**
+ * Read a VP's polar position relative to c0: { angle (radians), invDist
+ * (1 / pixel distance) }. invDist === 0 represents a VP at infinity.
+ */
+export function vpPolar(vp, c0) {
+  if (!vp) return { angle: 0, invDist: 0 };
+  if (vp.finite) {
+    const dx = vp.p.x - c0.x;
+    const dy = vp.p.y - c0.y;
+    const d = Math.hypot(dx, dy);
+    return { angle: Math.atan2(dy, dx), invDist: d > 1e-6 ? 1 / d : 0 };
+  }
+  return { angle: Math.atan2(vp.dir.y, vp.dir.x), invDist: 0 };
+}
+
+/**
+ * Set a VP from polar coords around c0. The corresponding anchor is rotated
+ * to match the new angle (its distance from c0 is preserved — so changing
+ * angle rotates anchor+VP together, while changing invDist alone leaves the
+ * anchor in place and just slides the VP along its ray). invDist === 0
+ * places the VP at infinity in that direction (parallel projection, no
+ * foreshortening along the axis).
+ */
+export function setVPPolar(corners, axis, angle, invDist) {
+  const vpKey = `v${axis}`;
+  const anchorIdx = ANCHOR_OF_AXIS[vpKey];
+  if (anchorIdx == null) return;
+  if (!stableVPs) stableVPs = edgeVPs(corners);
+  const c0 = corners[0];
+  const oldAnchor = corners[anchorIdx];
+  const oldLen = Math.hypot(oldAnchor.x - c0.x, oldAnchor.y - c0.y) || 1;
+  const dirX = Math.cos(angle);
+  const dirY = Math.sin(angle);
+  // Pull the VP closer than the anchor and we get a degenerate cube (anchor
+  // past the VP, derived corners blow up). Instead, shrink the cube on this
+  // axis: clamp anchor length to stay safely inside [c0, VP).
+  const len = invDist > 1e-9 ? Math.min(oldLen, ANCHOR_MAX_FRACTION / invDist) : oldLen;
+  corners[anchorIdx] = { x: c0.x + dirX * len, y: c0.y + dirY * len };
+  stableVPs[vpKey] = invDist > 1e-9
+    ? vpFinite({ x: c0.x + dirX / invDist, y: c0.y + dirY / invDist })
+    : vpInfinite({ x: dirX, y: dirY });
+  rebuildDerivedCorners(corners, stableVPs.vx, stableVPs.vy, stableVPs.vz);
+}
+
+const ANCHOR_MAX_FRACTION = 0.97;
+
 function applyVPDragRaw(corners, axis, newVpPos, seedVPs) {
   const anchorIdx = ANCHOR_OF_AXIS[`v${axis}`];
   const vpKey = `v${axis}`;
@@ -264,9 +340,12 @@ function applyVPDragRaw(corners, axis, newVpPos, seedVPs) {
   const dlen = Math.hypot(ddx, ddy);
   if (dlen < 1e-3 || oldLen < 1e-3) return false;
 
+  // Don't let the anchor escape past the VP — instead shrink the cube on
+  // this axis (mirroring the slider clamp in setVPPolar).
+  const len = Math.min(oldLen, dlen * ANCHOR_MAX_FRACTION);
   corners[anchorIdx] = {
-    x: c0.x + (ddx / dlen) * oldLen,
-    y: c0.y + (ddy / dlen) * oldLen,
+    x: c0.x + (ddx / dlen) * len,
+    y: c0.y + (ddy / dlen) * len,
   };
 
   const newVPs = { ...seedVPs, [vpKey]: vpFinite(newVpPos) };

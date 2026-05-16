@@ -38,7 +38,8 @@
     }
     .toolbox-header strong { flex: 1; font-size: 12px; color: #ddd; }
     aside.collapsed .toolbox-header strong,
-    aside.collapsed .toolbox-header .header-actions { display: none; }
+    aside.collapsed .toolbox-header .header-actions,
+    aside.collapsed .toolbox-header #help-btn { display: none; }
 
     .toolbox-body {
       flex: 1;
@@ -173,7 +174,57 @@
     }
     .opacity-row span { width: 24px; text-align: right; }
 
+    .vp-slider-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 4px;
+      font-size: 11px;
+      color: #888;
+    }
+    .vp-slider-label { width: 44px; flex-shrink: 0; }
+    .vp-slider-val { width: 46px; text-align: right; flex-shrink: 0; }
+
     .hint { color: #666; font-size: 11px; margin-top: 4px; }
+
+    .modal { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 10; }
+    .modal[hidden] { display: none; }
+    .modal-backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.55); }
+    .modal-card {
+      position: relative;
+      background: #181818;
+      border: 1px solid #2a2a2a;
+      border-radius: 6px;
+      width: min(820px, calc(100vw - 32px));
+      height: min(720px, calc(100vh - 64px));
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+    }
+    .modal-head {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 12px 18px;
+      border-bottom: 1px solid #2a2a2a;
+      background: #1f1f1f;
+      border-radius: 6px 6px 0 0;
+    }
+    .modal-head strong { flex: 1; font-size: 15px; color: #ddd; }
+    .modal-body {
+      padding: 18px 22px;
+      overflow-y: auto;
+      color: #ccc;
+      font-size: 15px;
+      line-height: 1.55;
+    }
+    .modal-body h3 { margin: 18px 0 8px; font-size: 16px; color: #eee; }
+    .modal-body h3:first-child { margin-top: 0; }
+    .modal-body p { margin: 0 0 10px; }
+    .modal-body ul { margin: 0 0 10px 22px; }
+    .modal-body li { margin: 4px 0; }
+    .modal-body em { color: #aaa; }
+    .modal-body strong { color: #e5e5e5; }
   </style>
 </head>
 <body>
@@ -184,16 +235,17 @@
     <div class="toolbox-header">
       <button id="toggle-toolbox" class="icon" title="Collapse">≡</button>
       <strong>Toolbox</strong>
+      <button id="help-btn" class="icon" title="Help & 3-point perspective primer">?</button>
       <div class="header-actions">
         <button id="reset-btn" title="Reset box to default">Reset</button>
       </div>
     </div>
     <div class="toolbox-body">
       <div class="section">
-        <div class="section-label">Grid spacing</div>
+        <div class="section-label">Ray count</div>
         <div class="row">
-          <input type="range" id="spacing" min="2" max="24" value="8" />
-          <span id="spacing-val" style="width:18px;text-align:right;">8</span>
+          <input type="range" id="spacing" min="2" max="96" value="8" />
+          <span id="spacing-val" style="width:24px;text-align:right;">8</span>
         </div>
       </div>
 
@@ -213,6 +265,56 @@
       <div class="hint">Drag corners · gizmo on hover · scroll = zoom · empty drag = pan</div>
     </div>
   </aside>
+  <div id="help-modal" class="modal" hidden>
+    <div class="modal-backdrop" data-close="1"></div>
+    <div class="modal-card" role="dialog" aria-labelledby="help-title" aria-modal="true">
+      <div class="modal-head">
+        <strong id="help-title">Perspective helper</strong>
+        <button id="help-close" class="icon" title="Close" data-close="1">×</button>
+      </div>
+      <div class="modal-body">
+        <p>A live 3-point perspective sandbox. Drop in a reference image, shape a wireframe box to its perspective, then use the auto-generated grids to draw consistent geometry.</p>
+
+        <h3>3-point perspective in 60 seconds</h3>
+        <p>In a perspective drawing, parallel lines in 3D converge at a <strong>vanishing point</strong> (VP) on the picture plane. A box aligned to three mutually perpendicular axes gives three VPs — <em>V<sub>x</sub></em>, <em>V<sub>y</sub></em>, <em>V<sub>z</sub></em> — one per axis. The closer a VP sits to the box, the stronger the foreshortening along that axis; pushing a VP to infinity makes that axis orthographic (parallel, no foreshortening).</p>
+        <p>The triangle formed by the three VPs is the <strong>cone of vision</strong>: its orthocenter is the camera's principal point, and its interior is the region a physical pinhole could actually photograph. Lines that wander outside this triangle become hyperbolically distorted — the projection no longer corresponds to a real view. The app dashes box edges that exit the triangle to flag this.</p>
+        <p>The line through any two VPs is a <strong>horizon</strong> for the third axis. Eye-level horizon = the line through the two horizontal-axis VPs.</p>
+
+        <h3>What you can drag</h3>
+        <ul>
+          <li><strong>Box corners</strong> — large dots are anchors (c0, c1, c2, c4); small dots are derived from the VPs. The opposite corner (c7) auto-computes.</li>
+          <li><strong>Vanishing points</strong> — drag the labeled VP dots directly. The corresponding anchor rotates with the VP.</li>
+          <li><strong>The whole box</strong> — hover anywhere on the box and drag with the gizmo. The VPs stay planted; the box re-fits with proper foreshortening.</li>
+          <li><strong>Reference images</strong> — same gizmo idea, drag to position.</li>
+        </ul>
+
+        <h3>Toolbox layers</h3>
+        <ul>
+          <li>Each layer has visibility (●/○), opacity, and (where applicable) a color swatch — click for a hue slider, or use the native picker on the Background layer.</li>
+          <li><strong>Grid</strong> layers fan rays from each VP through c0; tweak <em>Angle</em> and <em>1/dist</em> to rotate the VP around c0 or slide it along its ray. <em>1/dist</em> at 0 puts the VP at infinity (orthographic on that axis).</li>
+          <li><strong>Horizon</strong> layers draw the line through each VP pair, solid between and dashed beyond.</li>
+          <li><strong>VP triangle</strong> shows the cone of vision.</li>
+          <li><strong>Wireframe box</strong> tints its 1–3 camera-facing faces in the corresponding axis colors.</li>
+        </ul>
+
+        <h3>Navigation & shortcuts</h3>
+        <ul>
+          <li><strong>Pan</strong> — drag empty canvas. <strong>Zoom</strong> — scroll wheel (zooms into the cursor).</li>
+          <li><strong>Touch</strong> — single finger pans / drags handles; two fingers pinch-zoom and pan together.</li>
+          <li><strong>Undo / redo</strong> — Cmd/Ctrl+Z, Cmd/Ctrl+Shift+Z (or Cmd/Ctrl+Y).</li>
+          <li><strong>Reset</strong> — the button in the toolbox header restores the default box and VPs.</li>
+        </ul>
+
+        <h3>Tips</h3>
+        <ul>
+          <li>If a VP is pulled close enough to be inside the box, the cube auto-shrinks on that axis rather than turning inside out.</li>
+          <li>Off-canvas VPs are indicated by small colored arrows along the canvas edge pointing at them.</li>
+          <li>The "ray count" slider applies to all three grids — higher values give finer angular spacing around each VP.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
   <script type="module" src="js/app.js"></script>
 </body>
 </html>

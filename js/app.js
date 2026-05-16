@@ -9,9 +9,11 @@ import {
   estimateVanishingPoints,
   resetVPSolver,
   restoreVPs,
+  setVPPolar,
   snapshotVPs,
   syncCuboid,
   visibleFaces,
+  vpPolar,
   translateBoxKeepingVPs,
 } from "./cuboid.js";
 import { drawAxisGrid, drawVP } from "./grid.js";
@@ -37,6 +39,8 @@ const spacingInput = document.getElementById("spacing");
 const spacingVal = document.getElementById("spacing-val");
 const resetBtn = document.getElementById("reset-btn");
 const toggleBtn = document.getElementById("toggle-toolbox");
+const helpBtn = document.getElementById("help-btn");
+const helpModal = document.getElementById("help-modal");
 const toolbox = document.getElementById("toolbox");
 const uploadInput = document.getElementById("upload");
 const layersList = document.getElementById("layers-list");
@@ -609,6 +613,9 @@ function draw() {
   // Off-canvas / at-infinity VP indicators are drawn in screen space (after
   // the world transform is undone) so they stay a fixed pixel size.
   drawOffscreenVPIndicators(vps, w, h);
+
+  // Keep the toolbox VP sliders in sync with whatever the user did on canvas.
+  syncVPSliders();
 }
 
 /**
@@ -990,6 +997,19 @@ toggleBtn.addEventListener("click", () => {
   toggleBtn.textContent = toolbox.classList.contains("collapsed") ? "›" : "≡";
 });
 
+// Help modal: open via the ? button, close by clicking the close button, the
+// backdrop, or pressing Escape. The data-close="1" marker covers both the
+// backdrop and the × button so a single delegated listener handles both.
+helpBtn.addEventListener("click", () => helpModal.hidden = false);
+helpModal.addEventListener("click", (e) => {
+  if (e.target instanceof HTMLElement && e.target.dataset.close === "1") {
+    helpModal.hidden = true;
+  }
+});
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !helpModal.hidden) helpModal.hidden = true;
+});
+
 uploadInput.addEventListener("change", async (e) => {
   const files = Array.from(e.target.files || []);
   if (files.length) commitPre(snapshotState());
@@ -1147,6 +1167,44 @@ function renderLayerList() {
     opRow.append(slider, opLbl);
     row.appendChild(opRow);
 
+    // Per-grid VP controls: angle and 1/distance from c0. invDist=0 sends the
+    // VP to infinity, collapsing perspective along that axis to orthographic.
+    if (layer.type === "grid") {
+      const polar = vpPolar(snapshotVPs()?.[`v${layer.axis}`], corners[0]);
+      const angleRow = makeVPSlider({
+        id: `vp-angle-${layer.axis}`,
+        label: "Angle",
+        min: -180,
+        max: 180,
+        step: 1,
+        value: (polar.angle * 180) / Math.PI,
+        fmt: (v) => `${Math.round(v)}°`,
+        onInput: (v) => {
+          beginSliderEdit();
+          const current = vpPolar(snapshotVPs()?.[`v${layer.axis}`], corners[0]);
+          setVPPolar(corners, layer.axis, (v * Math.PI) / 180, current.invDist);
+          draw();
+        },
+      });
+      const distRow = makeVPSlider({
+        id: `vp-invdist-${layer.axis}`,
+        label: "1 / dist",
+        min: 0,
+        max: 0.01,
+        step: 0.00002,
+        value: polar.invDist,
+        fmt: (v) => v < 1e-6 ? "∞" : Math.round(1 / v) + "px",
+        onInput: (v) => {
+          beginSliderEdit();
+          const current = vpPolar(snapshotVPs()?.[`v${layer.axis}`], corners[0]);
+          setVPPolar(corners, layer.axis, current.angle, v);
+          draw();
+        },
+      });
+      row.appendChild(angleRow);
+      row.appendChild(distRow);
+    }
+
     if (swatch && openHueLayerId === layer.id) {
       const hueRow = document.createElement("div");
       hueRow.className = "hue-row";
@@ -1185,6 +1243,59 @@ function renderLayerList() {
     }
 
     layersList.appendChild(row);
+  }
+}
+
+function makeVPSlider({ id, label, min, max, step, value, fmt, onInput }) {
+  const row = document.createElement("div");
+  row.className = "vp-slider-row";
+  const lbl = document.createElement("span");
+  lbl.className = "vp-slider-label";
+  lbl.textContent = label;
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.id = id;
+  slider.min = String(min);
+  slider.max = String(max);
+  slider.step = String(step);
+  slider.value = String(value);
+  const valLbl = document.createElement("span");
+  valLbl.className = "vp-slider-val";
+  valLbl.textContent = fmt(value);
+  slider.addEventListener("input", () => {
+    const v = parseFloat(slider.value);
+    valLbl.textContent = fmt(v);
+    onInput(v);
+  });
+  slider.addEventListener("change", endSliderEdit);
+  row.append(lbl, slider, valLbl);
+  return row;
+}
+
+/**
+ * Push current VP polar coords into the toolbox sliders. Called after every
+ * draw so the sliders track direct canvas manipulations (VP drag, anchor
+ * drag, box translation). Skips a slider while it's being actively interacted
+ * with so we don't yank the thumb out from under the user.
+ */
+function syncVPSliders() {
+  const vps = snapshotVPs();
+  if (!vps) return;
+  const active = document.activeElement;
+  for (const axis of ["x", "y", "z"]) {
+    const polar = vpPolar(vps[`v${axis}`], corners[0]);
+    const angleEl = document.getElementById(`vp-angle-${axis}`);
+    if (angleEl && angleEl !== active) {
+      angleEl.value = String((polar.angle * 180) / Math.PI);
+      const val = angleEl.parentElement?.querySelector(".vp-slider-val");
+      if (val) val.textContent = `${Math.round((polar.angle * 180) / Math.PI)}°`;
+    }
+    const distEl = document.getElementById(`vp-invdist-${axis}`);
+    if (distEl && distEl !== active) {
+      distEl.value = String(polar.invDist);
+      const val = distEl.parentElement?.querySelector(".vp-slider-val");
+      if (val) val.textContent = polar.invDist < 1e-6 ? "∞" : Math.round(1 / polar.invDist) + "px";
+    }
   }
 }
 
