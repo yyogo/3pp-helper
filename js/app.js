@@ -9,6 +9,7 @@ import {
   estimateVanishingPoints,
   resetVPSolver,
   syncCuboid,
+  translateBoxKeepingVPs,
 } from "./cuboid.js";
 import { drawAxisGrid, drawVP } from "./grid.js";
 import {
@@ -574,12 +575,13 @@ canvas.addEventListener("pointermove", (e) => {
     if (layer.type === "image") {
       layer.pos = { x: dragGizmoOrigin.x + dx, y: dragGizmoOrigin.y + dy };
     } else if (layer.type === "box") {
+      // Reset corners to drag-start so edge lengths stay stable, then ask
+      // cuboid.js to translate the box while keeping the VPs fixed (anchors
+      // re-aim along rays from the new c0 to each unchanged VP).
       for (let i = 0; i < 8; i++) {
-        corners[i] = {
-          x: dragGizmoOrigin[i].x + dx,
-          y: dragGizmoOrigin[i].y + dy,
-        };
+        corners[i] = { x: dragGizmoOrigin[i].x, y: dragGizmoOrigin[i].y };
       }
+      translateBoxKeepingVPs(corners, dx, dy);
     }
     draw();
     return;

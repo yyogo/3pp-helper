@@ -362,6 +362,89 @@ export function defaultCorners(cx, cy, s) {
   return [c0, c1, c2, c3 ?? c0, c4, c5 ?? c0, c6 ?? c0, c7 ?? c0];
 }
 
+/**
+ * Translate the box while keeping the VPs fixed in world space.
+ *
+ * Each anchor sits at a constant *foreshortening fraction* `f_k` along the
+ * segment `c0 → VP_k` (where `f_k = |c_anchor - c0| / |VP - c0|` at drag
+ * start). After translating c0 to a new image position the anchor is placed
+ * at `newC0 + f_k * (VP - newC0)`. As c0 moves toward a VP, `|VP - newC0|`
+ * shrinks and so does the apparent edge length — matching real perspective
+ * foreshortening (camera looking down that axis sees the edge collapse).
+ *
+ * VPs at infinity preserve their absolute edge length (parallel projection
+ * has no foreshortening). If `boxConfigValid` fails (e.g. the box collapses
+ * past geometric usability) the translation is binary-search-clamped back to
+ * the largest valid fraction.
+ *
+ * Pass the *cumulative* delta from drag-start each frame (the caller should
+ * restore corners from a snapshot first so the fractions stay constant).
+ */
+export function translateBoxKeepingVPs(corners, dx, dy) {
+  if (!stableVPs) {
+    for (let i = 0; i < 8; i++) {
+      corners[i] = { x: corners[i].x + dx, y: corners[i].y + dy };
+    }
+    return;
+  }
+  const snap = snapshot(corners);
+  const anchors = [1, 2, 4];
+  const axes = ["vx", "vy", "vz"];
+  // fractions[k]: lerp ratio for finite VPs; infLens[k]: absolute edge length
+  // for VPs at infinity (parallel projection — no perspective shrink).
+  const fractions = [];
+  const infLens = [];
+  for (let k = 0; k < 3; k++) {
+    const vp = stableVPs[axes[k]];
+    const anchorIdx = anchors[k];
+    if (vp?.finite) {
+      const denom = Math.hypot(vp.p.x - snap[0].x, vp.p.y - snap[0].y);
+      const lenAnchor = Math.hypot(snap[anchorIdx].x - snap[0].x, snap[anchorIdx].y - snap[0].y);
+      fractions.push(denom > 1e-9 ? lenAnchor / denom : null);
+      infLens.push(null);
+    } else {
+      fractions.push(null);
+      infLens.push(Math.hypot(snap[anchorIdx].x - snap[0].x, snap[anchorIdx].y - snap[0].y));
+    }
+  }
+
+  const apply = (t) => {
+    restore(corners, snap);
+    const newC0 = { x: snap[0].x + dx * t, y: snap[0].y + dy * t };
+    corners[0] = newC0;
+    for (let k = 0; k < 3; k++) {
+      const vp = stableVPs[axes[k]];
+      if (!vp) continue;
+      if (vp.finite && fractions[k] != null) {
+        corners[anchors[k]] = {
+          x: newC0.x + (vp.p.x - newC0.x) * fractions[k],
+          y: newC0.y + (vp.p.y - newC0.y) * fractions[k],
+        };
+      } else if (!vp.finite) {
+        const len = Math.hypot(vp.dir.x, vp.dir.y);
+        if (len < 1e-9) continue;
+        corners[anchors[k]] = {
+          x: newC0.x + (vp.dir.x / len) * infLens[k],
+          y: newC0.y + (vp.dir.y / len) * infLens[k],
+        };
+      }
+    }
+    rebuildDerivedCorners(corners, stableVPs.vx, stableVPs.vy, stableVPs.vz);
+    return boxConfigValid(corners);
+  };
+
+  if (apply(1)) return;
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < 24; i++) {
+    const mid = (lo + hi) / 2;
+    if (apply(mid)) lo = mid;
+    else hi = mid;
+  }
+  if (lo > 1e-4) apply(lo);
+  else restore(corners, snap);
+}
+
 /** Reset the persistent VP state. Call from resetBox before syncing. */
 export function resetVPSolver() {
   stableVPs = null;
