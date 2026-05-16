@@ -145,6 +145,58 @@ function commitPre(snap) {
 let pendingPreSnap = null;
 let dragMoved = false;
 
+// Multi-touch gesture state. activePointers maps pointerId -> last screen
+// position; gesture is set when >=2 pointers are down. Single-pointer logic
+// (drags, pan) is suspended while a gesture is active.
+const activePointers = new Map();
+let gesture = null;
+
+function pointerScreenPos(e) {
+  const rect = canvas.getBoundingClientRect();
+  return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+}
+
+// Centroid + a representative scale (mean distance from centroid). Works for
+// any number of pointers >=2 and degrades gracefully when fingers are added
+// or removed (re-anchor on count change keeps motion continuous).
+function gestureMetrics() {
+  const ps = [...activePointers.values()];
+  let cx = 0;
+  let cy = 0;
+  for (const p of ps) {
+    cx += p.x;
+    cy += p.y;
+  }
+  cx /= ps.length;
+  cy /= ps.length;
+  let spread = 0;
+  for (const p of ps) spread += Math.hypot(p.x - cx, p.y - cy);
+  spread = Math.max(spread / ps.length, 1);
+  return { center: { x: cx, y: cy }, spread };
+}
+
+function beginGesture() {
+  const m = gestureMetrics();
+  gesture = {
+    spreadStart: m.spread,
+    zoomStart: zoom,
+    worldStart: screenToWorld(m.center.x, m.center.y),
+  };
+}
+
+function cancelSinglePointerInteractions() {
+  pendingPreSnap = null;
+  dragMoved = false;
+  dragCorner = -1;
+  dragGizmoLayerId = null;
+  dragGizmoStart = null;
+  dragGizmoOrigin = null;
+  dragVPAxis = null;
+  vpDragSeed = null;
+  panning = false;
+  panStart = null;
+}
+
 // Slider/color-picker state: captured on first "input", pushed on "change"
 // (which fires once at gesture end for both <input type="range"> and "color").
 let pendingSliderSnap = null;
@@ -579,6 +631,17 @@ canvas.addEventListener("pointerdown", (e) => {
   const sx = e.clientX - rect.left;
   const sy = e.clientY - rect.top;
 
+  activePointers.set(e.pointerId, { x: sx, y: sy });
+  if (activePointers.size >= 2) {
+    // Second (or third+) finger arriving: abandon any single-finger drag and
+    // re-anchor the pinch/pan gesture so it picks up from the current view.
+    cancelSinglePointerInteractions();
+    beginGesture();
+    canvas.setPointerCapture(e.pointerId);
+    canvas.style.cursor = "default";
+    return;
+  }
+
   // 1. VP handles take priority over everything else (they may sit anywhere,
   //    including inside the box hull or out in empty space).
   const vp = hitVP(sx, sy);
@@ -629,6 +692,21 @@ canvas.addEventListener("pointermove", (e) => {
   const rect = canvas.getBoundingClientRect();
   const sx = e.clientX - rect.left;
   const sy = e.clientY - rect.top;
+
+  if (activePointers.has(e.pointerId)) {
+    activePointers.set(e.pointerId, { x: sx, y: sy });
+  }
+  if (gesture && activePointers.size >= 2) {
+    const m = gestureMetrics();
+    const scale = m.spread / gesture.spreadStart;
+    zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, gesture.zoomStart * scale));
+    // Keep the world point that was under the gesture centroid at start
+    // glued to the current centroid: pan = center - worldStart * zoom.
+    panX = m.center.x - gesture.worldStart.x * zoom;
+    panY = m.center.y - gesture.worldStart.y * zoom;
+    draw();
+    return;
+  }
 
   if (dragVPAxis) {
     applyVPDrag(corners, dragVPAxis, screenToWorld(sx, sy), vpDragSeed);
@@ -697,8 +775,27 @@ canvas.addEventListener("pointermove", (e) => {
         : "default";
 });
 
-canvas.addEventListener("pointerup", () => {
-  // Push the pre-drag snapshot if a drag actually changed anything.
+canvas.addEventListener("pointerup", (e) => {
+  activePointers.delete(e.pointerId);
+
+  if (gesture) {
+    if (activePointers.size >= 2) {
+      // Still multi-touch (e.g. 3→2 fingers). Re-anchor so the remaining
+      // fingers don't trigger a sudden jump.
+      beginGesture();
+      return;
+    }
+    gesture = null;
+    if (activePointers.size === 1) {
+      // Drop back to a single-finger pan from the remaining touch's spot.
+      const [pos] = activePointers.values();
+      panning = true;
+      panStart = v(pos.x, pos.y);
+      panOrigin = v(panX, panY);
+    }
+    return;
+  }
+
   if (pendingPreSnap && dragMoved) commitPre(pendingPreSnap);
   pendingPreSnap = null;
   dragMoved = false;
@@ -713,15 +810,19 @@ canvas.addEventListener("pointerup", () => {
   canvas.style.cursor = "default";
 });
 
-canvas.addEventListener("pointercancel", () => {
-  // Cancel: don't commit a partial drag.
+canvas.addEventListener("pointercancel", (e) => {
+  activePointers.delete(e.pointerId);
+  if (gesture && activePointers.size < 2) {
+    gesture = null;
+    panning = false;
+    panStart = null;
+  }
   pendingPreSnap = null;
   dragMoved = false;
   dragCorner = -1;
   dragGizmoLayerId = null;
   dragVPAxis = null;
   vpDragSeed = null;
-  panning = false;
 });
 
 canvas.addEventListener("pointerleave", () => {
@@ -789,7 +890,14 @@ uploadInput.addEventListener("change", async (e) => {
   uploadInput.value = "";
 });
 
-window.addEventListener("resize", resize);
+// ResizeObserver fires on any layout change to the canvas's flex parent
+// (window resize, toolbox collapse/expand, etc.). The window-resize listener
+// alone would miss the collapse since the viewport width doesn't change.
+if (typeof ResizeObserver !== "undefined") {
+  new ResizeObserver(resize).observe(canvas.parentElement);
+} else {
+  window.addEventListener("resize", resize);
+}
 
 // ----- Layer list UI -----
 
