@@ -381,7 +381,12 @@ function drawBoxLayer(layer, vps, lineScale, handleScale, hovered) {
 
 function drawGridLayer(layer, vps, divisions, lineScale, rect, anchor) {
   const vp = { x: vps.vx, y: vps.vy, z: vps.vz }[layer.axis];
-  drawAxisGrid(ctx, vp, divisions, layer.color, lineScale, rect, anchor);
+  // Only triangle-clip when all three VPs are finite — otherwise the cone of
+  // vision isn't a closed triangle and the fall-back rect clipping is right.
+  const triangle = vps.vx?.finite && vps.vy?.finite && vps.vz?.finite
+    ? [vps.vx.p, vps.vy.p, vps.vz.p]
+    : null;
+  drawAxisGrid(ctx, vp, divisions, layer.color, lineScale, rect, anchor, triangle);
 }
 
 function gridLayerColor(axis) {
